@@ -1,13 +1,4 @@
-"""Deforestation detection workflow built on open Landsat imagery.
-
-This module replaces the original Google Earth Engine based approach with a
-purely open-data solution so the project can run on Streamlit Community Cloud
-without requiring Earth Engine credentials. Landsat Collection 2 Level 2 scenes
-are retrieved from the public STAC API operated by Element84
-(`https://earth-search.aws.element84.com`). Each scene is clipped to the area of
-interest, converted to surface reflectance, and NDVI statistics are derived to
-detect vegetation loss.
-"""
+"""Utilities for downloading and analysing Landsat NDVI time-series data."""
 
 from __future__ import annotations
 
@@ -15,18 +6,17 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, List, Optional
 
+import folium
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import pyproj
 import rasterio
+from pystac_client import Client
 from rasterio.errors import RasterioIOError
 from rasterio.mask import mask
 from shapely.geometry import Polygon, mapping
-from pystac_client import Client
-import folium
-
 
 STAC_API_URL = "https://earth-search.aws.element84.com/v1"
 LANDSAT_COLLECTION = "landsat-c2-l2"
@@ -38,7 +28,7 @@ L2_OFFSET = -0.2
 
 @dataclass
 class LandsatScene:
-    """Simple container for Landsat scene metadata used in the workflow."""
+    """Container for the assets required to compute NDVI for a scene."""
 
     id: str
     datetime: datetime
@@ -47,22 +37,20 @@ class LandsatScene:
 
 
 class DeforestationDetector:
-    """
-    A class to detect and analyze deforestation using Google Earth Engine
-    and NDVI time series analysis.
-    """
-    
-    def __init__(self, start_year=2015, end_year=2024, credentials=None):
-        """
-        Initialize the DeforestationDetector.
-        
-        Parameters:
-        -----------
-        start_year : int
-            Starting year for analysis
-        end_year : int
-            Ending year for analysis
-        """
+    """Download Landsat L2 scenes and derive NDVI statistics for polygons."""
+
+    def __init__(
+        self,
+        start_year: int = 2015,
+        end_year: int = 2024,
+        *,
+        max_cloud_cover: int = 40,
+        stac_url: str = STAC_API_URL,
+        stac_client: Optional[Client] = None,
+    ) -> None:
+        if end_year < start_year:
+            raise ValueError("end_year must be greater or equal to start_year")
+
         self.start_year = start_year
         self.end_year = end_year
         self.start_date = f"{start_year}-01-01"
@@ -74,8 +62,10 @@ class DeforestationDetector:
     # ------------------------------------------------------------------
     # Geometry helpers
     # ------------------------------------------------------------------
-    def create_buffer_polygon(self, latitude: float, longitude: float, buffer_km: float = 5) -> Polygon:
-        """Create a geodesic buffer polygon around a lat/lon point."""
+    def create_buffer_polygon(
+        self, latitude: float, longitude: float, buffer_km: float = 5
+    ) -> Polygon:
+        """Return a polygon approximating a geodesic buffer around a point."""
 
         azimuths = np.linspace(0, 360, num=73)
         lon_arr = np.full_like(azimuths, longitude, dtype=float)
@@ -89,7 +79,7 @@ class DeforestationDetector:
     # Landsat retrieval and processing
     # ------------------------------------------------------------------
     def _search_landsat_scenes(self, polygon: Polygon) -> List[LandsatScene]:
-        """Query the STAC API for Landsat scenes covering the polygon."""
+        """Query the STAC API for Landsat scenes covering ``polygon``."""
 
         search = self.client.search(
             collections=[LANDSAT_COLLECTION],
@@ -109,7 +99,9 @@ class DeforestationDetector:
             scenes.append(
                 LandsatScene(
                     id=item.id,
-                    datetime=datetime.fromisoformat(item.properties["datetime"].replace("Z", "+00:00")),
+                    datetime=datetime.fromisoformat(
+                        item.properties["datetime"].replace("Z", "+00:00")
+                    ),
                     nir_href=assets[NIR_BAND].href,
                     red_href=assets[RED_BAND].href,
                 )
@@ -119,38 +111,36 @@ class DeforestationDetector:
         return scenes
 
     def _read_band_array(self, href: str, polygon: Polygon) -> np.ndarray:
-        """Read a band as a masked array clipped to the polygon."""
+        """Read a single Landsat band clipped to ``polygon`` as a float array."""
 
         try:
-            if credentials is not None:
-                ee.Initialize(credentials)
-            else:
-                ee.Initialize()
-            print("✓ Google Earth Engine initialized successfully")
-        except Exception as e:
-            print("✗ Error initializing Earth Engine. Please authenticate:")
-            print("  Run: ee.Authenticate()")
-            raise e
-    
-    def load_locations_from_csv(self, csv_path):
-        """
-        Load location coordinates from a CSV file.
-        
-        Parameters:
-        -----------
-        csv_path : str
-            Path to CSV file with columns: location_name, latitude, longitude
-            
-        Returns:
-        --------
-        pandas.DataFrame
-            DataFrame with location information
-        """
+            with rasterio.open(href) as src:
+                nodata = src.nodata
+                data, _ = mask(src, [mapping(polygon)], crop=True)
+        except RasterioIOError as exc:  # pragma: no cover - network/local IO
+            raise RuntimeError(f"Unable to read raster {href}") from exc
+
+        band = data[0].astype("float32")
+        if nodata is not None:
+            band[band == nodata] = np.nan
+        band = np.where(band == -9999, np.nan, band)
+        band = np.where(band == 0, np.nan, band)
+        return band
+
+    def _calculate_scene_ndvi(self, scene: LandsatScene, polygon: Polygon) -> Optional[float]:
+        """Return the mean NDVI for ``scene`` over ``polygon``."""
+
         try:
             nir = self._read_band_array(scene.nir_href, polygon)
             red = self._read_band_array(scene.red_href, polygon)
         except RuntimeError:
             return None
+
+        if nir.shape != red.shape:
+            min_rows = min(nir.shape[0], red.shape[0])
+            min_cols = min(nir.shape[1], red.shape[1])
+            nir = nir[:min_rows, :min_cols]
+            red = red[:min_rows, :min_cols]
 
         nir_reflectance = nir * L2_SCALE + L2_OFFSET
         red_reflectance = red * L2_SCALE + L2_OFFSET
@@ -165,13 +155,12 @@ class DeforestationDetector:
 
         return float(np.nanmean(ndvi))
 
-    def extract_ndvi_time_series(self, geometry: Polygon, location_name: str) -> pd.DataFrame:
-        """Extract NDVI statistics for all Landsat scenes over the polygon."""
-
-        print(f"\n📊 Processing {location_name}...")
+    def extract_ndvi_time_series(
+        self, geometry: Polygon, location_name: str
+    ) -> pd.DataFrame:
+        """Extract NDVI measurements for every Landsat scene that intersects."""
 
         scenes = self._search_landsat_scenes(geometry)
-        print(f"  Found {len(scenes)} candidate scenes")
 
         records: List[Dict[str, object]] = []
         for scene in scenes:
@@ -190,35 +179,38 @@ class DeforestationDetector:
         if not df.empty:
             df["date"] = pd.to_datetime(df["date"])
             df = df.sort_values("date")
-            print(f"  ✓ Extracted {len(df)} NDVI measurements")
-        else:
-            print(f"  ⚠ No valid NDVI observations for {location_name}")
-
         return df
 
     # ------------------------------------------------------------------
     # Analysis and visualisation utilities
     # ------------------------------------------------------------------
     def analyze_deforestation(self, df: pd.DataFrame) -> Dict[str, object]:
-        """Analyze NDVI trends to detect deforestation."""
+        """Analyse NDVI trends to detect possible deforestation."""
 
         if df.empty:
             return {
                 "trend": None,
-                "change_percentage": 0,
-                "mean_ndvi_start": 0,
-                "mean_ndvi_end": 0,
+                "change_percentage": 0.0,
+                "mean_ndvi_start": 0.0,
+                "mean_ndvi_end": 0.0,
                 "deforestation_detected": False,
+                "annual_means": pd.Series(dtype=float),
             }
 
         df = df.copy()
         df["year"] = df["date"].dt.year
         annual_means = df.groupby("year")["ndvi_mean"].mean()
 
-        first_period = df[df["year"] <= df["year"].min() + 2]["ndvi_mean"].mean()
-        last_period = df[df["year"] >= df["year"].max() - 2]["ndvi_mean"].mean()
+        first_period = (
+            df[df["year"] <= df["year"].min() + 2]["ndvi_mean"].mean()
+        )
+        last_period = (
+            df[df["year"] >= df["year"].max() - 2]["ndvi_mean"].mean()
+        )
 
-        change_percentage = ((last_period - first_period) / first_period) * 100 if first_period != 0 else 0
+        change_percentage = (
+            ((last_period - first_period) / first_period) * 100 if first_period else 0.0
+        )
         deforestation_detected = change_percentage < -15
 
         return {
@@ -229,28 +221,24 @@ class DeforestationDetector:
             "deforestation_detected": deforestation_detected,
             "annual_means": annual_means,
         }
-        
-        return results
-    
-    def plot_ndvi_time_series(self, df_dict, save_path=None, show=True):
-        """
-        Create visualization of NDVI time series for multiple locations.
-        
-        Parameters:
-        -----------
-        df_dict : dict
-            Dictionary with location names as keys and DataFrames as values
-        save_path : str, optional
-            Path to save the plot
-        """
-        fig, axes = plt.subplots(len(df_dict), 1, figsize=(14, 6*len(df_dict)))
-        
+
+    def plot_ndvi_time_series(
+        self,
+        df_dict: Dict[str, pd.DataFrame],
+        *,
+        save_path: Optional[str] = None,
+        show: bool = True,
+    ) -> plt.Figure:
+        """Create a multi-panel NDVI plot from the extracted time-series."""
+
+        if not df_dict:
+            raise ValueError("df_dict must contain at least one location")
+
+        fig, axes = plt.subplots(len(df_dict), 1, figsize=(14, 6 * len(df_dict)))
         if len(df_dict) == 1:
             axes = [axes]
 
-        for idx, (location_name, df) in enumerate(df_dict.items()):
-            ax = axes[idx]
-
+        for ax, (location_name, df) in zip(axes, df_dict.items()):
             if df.empty:
                 ax.text(
                     0.5,
@@ -261,6 +249,7 @@ class DeforestationDetector:
                     fontsize=12,
                 )
                 ax.set_title(f"{location_name} - No Data")
+                ax.set_axis_off()
                 continue
 
             df = df.copy()
@@ -295,13 +284,19 @@ class DeforestationDetector:
             )
 
             analysis = self.analyze_deforestation(df)
-            status = "⚠ DEFORESTATION DETECTED" if analysis["deforestation_detected"] else "✓ Stable/Improving"
+            status = (
+                "⚠ DEFORESTATION DETECTED"
+                if analysis["deforestation_detected"]
+                else "✓ Stable/Improving"
+            )
 
             ax.set_xlabel("Date", fontsize=12, fontweight="bold")
             ax.set_ylabel("NDVI", fontsize=12, fontweight="bold")
             ax.set_title(
-                f"{location_name} - NDVI Time Series\n"
-                f"Change: {analysis['change_percentage']:.1f}% | Status: {status}",
+                (
+                    f"{location_name} - NDVI Time Series\n"
+                    f"Change: {analysis['change_percentage']:.1f}% | Status: {status}"
+                ),
                 fontsize=13,
                 fontweight="bold",
                 pad=15,
@@ -313,52 +308,36 @@ class DeforestationDetector:
 
             ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
             ax.xaxis.set_major_locator(mdates.YearLocator())
-            plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right')
-        
+            plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha="right")
+
         fig.tight_layout()
 
         if save_path:
-            fig.savefig(save_path, dpi=300, bbox_inches='tight')
-            print(f"\n💾 Plot saved to: {save_path}")
-
+            fig.savefig(save_path, dpi=300, bbox_inches="tight")
         if show:
             plt.show()
-
         return fig
-    
-    def create_interactive_map(self, locations_df, ndvi_data_dict):
-        """
-        Create an interactive map showing the locations and their status.
-        
-        Parameters:
-        -----------
-        locations_df : pandas.DataFrame
-            DataFrame with location information
-        ndvi_data_dict : dict
-            Dictionary with NDVI time series data
-            
-        Returns:
-        --------
-        folium.Map
-            Interactive map object
-        """
-        # Calculate center point
-        center_lat = locations_df['latitude'].mean()
-        center_lon = locations_df['longitude'].mean()
-        
-        # Create map
-        m = folium.Map(
-            location=[center_lat, center_lon],
-            zoom_start=7,
-            tiles='OpenStreetMap'
-        )
-        
-        # Add markers for each location
-        for idx, row in locations_df.iterrows():
-            location_name = row['location_name']
-            
+
+    def create_interactive_map(
+        self, locations_df: pd.DataFrame, ndvi_data_dict: Dict[str, pd.DataFrame]
+    ) -> folium.Map:
+        """Render an interactive map with NDVI status indicators."""
+
+        if locations_df.empty:
+            raise ValueError("locations_df must contain at least one location")
+
+        center_lat = locations_df["latitude"].mean()
+        center_lon = locations_df["longitude"].mean()
+
+        m = folium.Map(location=[center_lat, center_lon], zoom_start=7, tiles="OpenStreetMap")
+
+        for _, row in locations_df.iterrows():
+            location_name = row["location_name"]
+            analysis = None
             if location_name in ndvi_data_dict and not ndvi_data_dict[location_name].empty:
                 analysis = self.analyze_deforestation(ndvi_data_dict[location_name])
+
+            if analysis:
                 color = "red" if analysis["deforestation_detected"] else "green"
                 icon = "exclamation-triangle" if analysis["deforestation_detected"] else "leaf"
                 popup_html = f"""
@@ -388,3 +367,16 @@ class DeforestationDetector:
 
         return m
 
+    # ------------------------------------------------------------------
+    # Utilities
+    # ------------------------------------------------------------------
+    def load_locations_from_csv(self, csv_path: str) -> pd.DataFrame:
+        """Load a CSV file containing ``location_name``, ``latitude`` and ``longitude``."""
+
+        df = pd.read_csv(csv_path)
+        required = {"location_name", "latitude", "longitude"}
+        missing = required.difference(df.columns)
+        if missing:
+            missing_cols = ", ".join(sorted(missing))
+            raise ValueError(f"CSV is missing required column(s): {missing_cols}")
+        return df
