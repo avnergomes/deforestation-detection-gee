@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+import importlib
 from typing import Dict, List, Optional
 
 import folium
@@ -47,6 +48,8 @@ class DeforestationDetector:
         max_cloud_cover: int = 40,
         stac_url: str = STAC_API_URL,
         stac_client: Optional[Client] = None,
+        credentials: Optional[object] = None,
+        initialize_earth_engine: bool = True,
     ) -> None:
         if end_year < start_year:
             raise ValueError("end_year must be greater or equal to start_year")
@@ -58,6 +61,31 @@ class DeforestationDetector:
         self.max_cloud_cover = max_cloud_cover
         self.geod = pyproj.Geod(ellps="WGS84")
         self.client = stac_client or Client.open(stac_url)
+        self.credentials = credentials
+
+        if initialize_earth_engine:
+            self._initialize_earth_engine(credentials)
+
+    def _initialize_earth_engine(self, credentials: Optional[object]) -> None:
+        """Initialize the Google Earth Engine client if the package is available."""
+
+        ee_spec = importlib.util.find_spec("ee")
+        if ee_spec is None:
+            if credentials is not None:
+                raise RuntimeError(
+                    "earthengine-api is not installed, but credentials were provided."
+                )
+            return
+
+        ee = importlib.import_module("ee")
+
+        try:
+            if credentials is not None:
+                ee.Initialize(credentials)
+            else:
+                ee.Initialize()
+        except Exception as exc:  # pragma: no cover - depends on auth state
+            raise RuntimeError("Failed to initialize Google Earth Engine") from exc
 
     # ------------------------------------------------------------------
     # Geometry helpers
