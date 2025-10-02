@@ -167,7 +167,9 @@ adjust the band names and scaling factors accordingly.
 **Do I need a Google Earth Engine account?**  
 No. All data is accessed through open STAC APIs and processed locally.
 
----
+**Can I use Sentinel-2 or another dataset?**  
+Yes. Update `_search_landsat_scenes` to point to a different STAC collection and
+adjust the band names and scaling factors accordingly.
 
 ## 🛠️ Troubleshooting
 
