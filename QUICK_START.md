@@ -1,157 +1,117 @@
 # Quick Start Guide
 
-Get up and running with deforestation detection in 5 minutes!
+Get up and running with the Landsat-based deforestation detector in minutes.
 
 ## 🚀 Fast Track Installation
 
 ### Step 1: Install Python packages (2 min)
 
-```bash
-pip install earthengine-api geemap pandas matplotlib folium numpy
-```
-
-### Step 2: Authenticate Google Earth Engine (2 min)
-
-Open Python and run:
-
-```python
-import ee
-ee.Authenticate()
-```
-
-This opens a browser for Google login. Follow the prompts and you're done!
-
-### Step 3: Run the analysis (1 min)
+Install the dependencies listed in `requirements.txt`:
 
 ```bash
-python deforestation_detector.py
+pip install -r requirements.txt
 ```
 
-That's it! 🎉
+The detector relies on scientific Python packages (`numpy`, `pandas`,
+`matplotlib`) plus geospatial tooling (`rasterio`, `pyproj`, `shapely`,
+`pystac-client`) to query the Landsat STAC catalog and process imagery locally.
+
+### Step 2: Run the analysis script (1 min)
+
+Execute the simple example to confirm everything works end-to-end:
+
+```bash
+python simple_example.py
+```
+
+The script downloads a few Landsat scenes from the Element84 STAC API, computes
+NDVI for two sample locations in Oregon, and saves a plot named
+`simple_results.png`.
+
+### Step 3: Launch the Streamlit app (optional)
+
+```bash
+streamlit run streamlit_app.py
+```
+
+Upload your own CSV of locations—or use the bundled `locations.csv`—and click
+**Run analysis** to generate time-series charts, an interactive folium map, and a
+summary table.
 
 ---
 
 ## 📁 Files You Need
 
-Download these 3 files to the same folder:
+Make sure these files are in the same folder:
 
-1. **deforestation_detector.py** - Main script
-2. **locations.csv** - Your coordinates (already includes 2 Oregon locations)
-3. **requirements.txt** - Package list (optional)
+1. **deforestation_detector.py** – Core Landsat NDVI workflow
+2. **locations.csv** – Sample coordinates for testing
+3. **streamlit_app.py** – Streamlit dashboard
+4. **simple_example.py** – Minimal command-line example
 
 ---
 
-## 💡 First Time Using Python?
+## 💡 New to Python?
 
 ### Install Python
 
-**Windows**: Download from [python.org](https://www.python.org/downloads/)  
-**Mac**: `brew install python3`  
-**Linux**: `sudo apt-get install python3-pip`
+- **Windows**: Download from [python.org](https://www.python.org/downloads/)
+- **macOS**: `brew install python3`
+- **Linux**: `sudo apt-get install python3-pip`
 
 ### Run Commands
 
-**Windows**: Use Command Prompt or PowerShell  
-**Mac/Linux**: Use Terminal
+- **Windows**: Use Command Prompt or PowerShell
+- **macOS/Linux**: Use Terminal
 
 ---
 
-## 🗺️ Your Two Test Locations (Oregon, USA)
+## 🗺️ Sample Locations (Oregon, USA)
 
-The included `locations.csv` has:
+The provided `locations.csv` contains two areas for validation:
 
-1. **Willamette National Forest** - Logging area (should show deforestation)
-2. **Crater Lake National Park** - Protected area (should be stable)
+1. **Willamette National Forest** – Logging activity
+2. **Crater Lake National Park** – Protected area
 
 ---
 
 ## 📊 Expected Results
 
-After ~5 minutes of processing, you'll get:
+Running the example or Streamlit app produces:
 
-1. **ndvi_time_series.png**
-   - Shows NDVI trends from 2015-2024
-   - Red alert if deforestation detected
-
-2. **deforestation_map.html**
-   - Interactive map (open in browser)
-   - Red markers = deforestation
-   - Green markers = stable forest
-
-3. **Console Report**
-   - Statistics and change percentages
-   - Clear detection status
+1. **NDVI plot (`simple_results.png`)** – Visualises vegetation trends
+2. **Interactive map** – Colour-coded markers by deforestation status
+3. **Console summary** – Change percentages and detection status
 
 ---
 
 ## ❓ Troubleshooting
 
-### "ModuleNotFoundError: No module named 'ee'"
+### "ModuleNotFoundError"
 
-**Fix**: Run `pip install earthengine-api`
+**Fix**: Install dependencies with `pip install -r requirements.txt`.
 
----
+### "No NDVI observations"
 
-### "Please authenticate Earth Engine"
+**Fix**: Increase the buffer radius or widen the start/end years to capture more
+Landsat scenes.
 
-**Fix**: 
-```python
-import ee
-ee.Authenticate()
-```
+### Slow downloads
 
----
-
-### "No images found"
-
-**Fix**: Location might be too cloudy. Try different coordinates or expand date range in code:
-
-```python
-detector = DeforestationDetector(start_year=2013, end_year=2024)
-```
-
----
-
-## 🎯 Test with Your Own Locations
-
-Edit `locations.csv`:
-
-```csv
-location_name,latitude,longitude
-My Forest,45.5231,-122.6765
-My Field,45.4234,-122.5432
-```
-
-Then run: `python deforestation_detector.py`
-
----
-
-## 📞 Need Help?
-
-**Common fixes**:
-- Update packages: `pip install --upgrade earthengine-api`
-- Re-authenticate: `ee.Authenticate()`
-- Check coordinates are decimal degrees (not DMS)
-- Ensure internet connection is stable
-
-**Still stuck?** Check the full README.md for detailed documentation.
+**Fix**: Run the analysis with fewer locations or a smaller buffer to reduce the
+amount of imagery requested from AWS.
 
 ---
 
 ## ✅ Success Checklist
 
 - [ ] Python installed
-- [ ] Packages installed
-- [ ] Earth Engine authenticated
-- [ ] locations.csv in same folder as script
-- [ ] Script runs without errors
-- [ ] PNG and HTML files generated
-- [ ] Results make sense
+- [ ] Dependencies installed
+- [ ] `simple_example.py` runs without errors
+- [ ] `simple_results.png` generated
+- [ ] Streamlit app loads (optional)
+- [ ] Results match expectations
 
----
+Estimated total time: **5–10 minutes**
 
-**Estimated Total Time**: 5-10 minutes  
-**Processing Time**: ~3-5 minutes per location  
-**Output Size**: ~2-5 MB
-
-Now you're ready to detect deforestation! 🌲📊
+You're ready to monitor deforestation with open Landsat data! 🌲📊
