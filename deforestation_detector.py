@@ -26,7 +26,7 @@ class DeforestationDetector:
     and NDVI time series analysis.
     """
     
-    def __init__(self, start_year=2015, end_year=2024):
+    def __init__(self, start_year=2015, end_year=2024, credentials=None):
         """
         Initialize the DeforestationDetector.
         
@@ -44,7 +44,10 @@ class DeforestationDetector:
         
         # Initialize Earth Engine
         try:
-            ee.Initialize()
+            if credentials is not None:
+                ee.Initialize(credentials)
+            else:
+                ee.Initialize()
             print("✓ Google Earth Engine initialized successfully")
         except Exception as e:
             print("✗ Error initializing Earth Engine. Please authenticate:")
@@ -270,7 +273,7 @@ class DeforestationDetector:
         
         return results
     
-    def plot_ndvi_time_series(self, df_dict, save_path=None):
+    def plot_ndvi_time_series(self, df_dict, save_path=None, show=True):
         """
         Create visualization of NDVI time series for multiple locations.
         
@@ -334,13 +337,16 @@ class DeforestationDetector:
             ax.xaxis.set_major_locator(mdates.YearLocator())
             plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right')
         
-        plt.tight_layout()
-        
+        fig.tight_layout()
+
         if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            fig.savefig(save_path, dpi=300, bbox_inches='tight')
             print(f"\n💾 Plot saved to: {save_path}")
-        
-        plt.show()
+
+        if show:
+            plt.show()
+
+        return fig
     
     def create_interactive_map(self, locations_df, ndvi_data_dict):
         """
