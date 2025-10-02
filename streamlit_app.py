@@ -1,6 +1,8 @@
 """Streamlit interface for the deforestation detection workflow."""
 
-from typing import Dict
+from typing import Dict, Optional
+
+import ee
 import pandas as pd
 import streamlit as st
 from streamlit_folium import st_folium
@@ -22,6 +24,19 @@ def _load_locations(upload) -> pd.DataFrame:
             f"CSV is missing required column(s): {', '.join(missing)}"
         )
     return df[REQUIRED_COLUMNS + [col for col in df.columns if col not in REQUIRED_COLUMNS]]
+
+
+def _get_ee_credentials() -> Optional[ee.ServiceAccountCredentials]:
+    """Fetch Google Earth Engine credentials from Streamlit secrets if available."""
+    service_account = st.secrets.get("GEE_SERVICE_ACCOUNT")
+    private_key = st.secrets.get("GEE_PRIVATE_KEY")
+
+    if service_account and private_key:
+        return ee.ServiceAccountCredentials(service_account, key_data=private_key)
+
+    return None
+
+
 def _run_analysis(detector: DeforestationDetector, locations: pd.DataFrame, buffer_km: float) -> Dict[str, pd.DataFrame]:
     """Execute the NDVI extraction workflow for each location."""
     ndvi_data: Dict[str, pd.DataFrame] = {}
@@ -92,9 +107,8 @@ st.set_page_config(
 
 st.title("🌲 Deforestation Detection Dashboard")
 st.write(
-    "Analyze vegetation change with Landsat NDVI data sourced from the public "
-    "Element84 STAC API. Upload your CSV with `location_name`, `latitude`, and "
-    "`longitude`, then launch the analysis."
+    "Analyze vegetation change with Landsat NDVI data. Upload your CSV with `location_name`, "
+    "`latitude`, and `longitude`, then launch the analysis."
 )
 
 with st.sidebar:
@@ -102,13 +116,6 @@ with st.sidebar:
     start_year = st.number_input("Start year", min_value=1984, max_value=2024, value=2015)
     end_year = st.number_input("End year", min_value=start_year, max_value=2024, value=2024)
     buffer_km = st.slider("Buffer radius (km)", min_value=1, max_value=20, value=5)
-    max_cloud_cover = st.slider(
-        "Max cloud cover (%)",
-        min_value=0,
-        max_value=100,
-        value=20,
-        help="Scenes with higher reported cloud cover are ignored to improve NDVI quality.",
-    )
     uploaded_csv = st.file_uploader("Locations CSV", type=["csv"], accept_multiple_files=False)
     run_button = st.button("Run analysis", type="primary")
 
@@ -119,27 +126,25 @@ if run_button:
         st.error(f"Unable to read locations CSV: {exc}")
         st.stop()
 
+    credentials = _get_ee_credentials()
+
     try:
         detector = DeforestationDetector(
             start_year=int(start_year),
             end_year=int(end_year),
-            max_cloud_cover=int(max_cloud_cover),
+            credentials=credentials,
         )
-    except Exception as exc:  # pragma: no cover - depends on remote service
+    except Exception as exc:  # pragma: no cover - depends on runtime auth
         st.error(
-            "Unable to initialise the Landsat STAC client. "
-            "Check your network connection and try again."
+            "Failed to initialize Google Earth Engine. "
+            "Ensure credentials are configured in Streamlit secrets or authenticate locally."
         )
         st.exception(exc)
         st.stop()
 
-    try:
-        with st.spinner("Downloading Landsat scenes and computing NDVI..."):
-            ndvi_results = _run_analysis(detector, locations_df, buffer_km=float(buffer_km))
-    except Exception as exc:  # pragma: no cover - depends on remote service
-        st.error("NDVI analysis failed. Please retry with a smaller area or later.")
-        st.exception(exc)
-        st.stop()
+    st.success("Google Earth Engine initialized successfully")
+
+    ndvi_results = _run_analysis(detector, locations_df, buffer_km=float(buffer_km))
 
     if ndvi_results:
         st.subheader("NDVI Time Series")

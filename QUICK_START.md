@@ -94,8 +94,7 @@ Running the example or Streamlit app produces:
 ### "No NDVI observations"
 
 **Fix**: Increase the buffer radius or widen the start/end years to capture more
-Landsat scenes. You can also raise the **Max cloud cover** slider in the
-Streamlit sidebar to accept scenes with partial cloud contamination.
+Landsat scenes.
 
 ### Slow downloads
 

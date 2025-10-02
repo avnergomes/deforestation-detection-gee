@@ -9,9 +9,11 @@
 ## 📋 Project Overview
 
 This project provides a Python-based workflow for detecting land cover changes
-and deforestation using freely available Landsat imagery. The workflow talks
-directly to the public Landsat Collection 2 Level 2 archive published on AWS via
-the Element84 STAC API and computes NDVI locally using `rasterio`.
+and deforestation using freely available Landsat imagery. The original solution
+depended on Google Earth Engine, which is not available on Streamlit Community
+Cloud. The codebase now talks directly to the public Landsat Collection 2 Level
+2 archive published on AWS via the Element84 STAC API and computes NDVI locally
+using `rasterio`.
 
 ### Key Features
 
@@ -22,7 +24,7 @@ the Element84 STAC API and computes NDVI locally using `rasterio`.
   loss using NDVI trends.
 - ✅ **Interactive Visualizations**: Generates time series plots and interactive
   maps for quick exploration.
-- ✅ **Streamlit Dashboard**: Runs without any private credentials and is ready
+- ✅ **Streamlit Dashboard**: Runs without Earth Engine credentials and is ready
   for deployment on Streamlit Community Cloud.
 
 ---
@@ -91,6 +93,19 @@ deforestation-detection-gee/
 
 2. **Run your custom analysis**:
 
+### Streamlit App
+
+Deploy the interactive dashboard locally or on Streamlit Community Cloud:
+
+```bash
+pip install -r requirements.txt
+streamlit run streamlit_app.py
+```
+
+When running on Streamlit Community Cloud, add your Google Earth Engine service account
+credentials to `st.secrets` using the keys `GEE_SERVICE_ACCOUNT` and `GEE_PRIVATE_KEY`.
+If no CSV is uploaded, the app falls back to the bundled `locations.csv` example.
+
    ```python
    from deforestation_detector import DeforestationDetector
    import pandas as pd
@@ -120,9 +135,7 @@ streamlit run streamlit_app.py
 
 Upload a CSV (or use the bundled `locations.csv`) and click **Run analysis**.
 The app downloads the required Landsat scenes, calculates NDVI per observation,
-and displays charts, maps, and summary statistics. Use the **Max cloud cover**
-slider in the sidebar if you need to relax or tighten the quality filter applied
-to the STAC search (lower values exclude cloudy scenes).
+and displays charts, maps, and summary statistics.
 
 ---
 
@@ -146,6 +159,13 @@ threshold by modifying `analyze_deforestation` in `deforestation_detector.py`.
 **Why is the first run slow?**  
 Scenes are downloaded on demand from AWS. Subsequent runs that reuse the same
 locations and time range benefit from HTTP caching handled by GDAL.
+
+**Can I use Sentinel-2 or another dataset?**  
+Yes. Update `_search_landsat_scenes` to point to a different STAC collection and
+adjust the band names and scaling factors accordingly.
+
+**Do I need a Google Earth Engine account?**  
+No. All data is accessed through open STAC APIs and processed locally.
 
 **Can I use Sentinel-2 or another dataset?**  
 Yes. Update `_search_landsat_scenes` to point to a different STAC collection and

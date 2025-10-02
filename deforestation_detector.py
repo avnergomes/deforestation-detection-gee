@@ -1,10 +1,12 @@
 """Deforestation detection workflow built on open Landsat imagery.
 
-The detector downloads Landsat Collection 2 Level 2 scenes from the public STAC
-API operated by Element84 (``https://earth-search.aws.element84.com``). Each
-scene is clipped to the area of interest, converted to surface reflectance, and
-NDVI statistics are derived to detect vegetation loss without any external
-credential requirements.
+This module replaces the original Google Earth Engine based approach with a
+purely open-data solution so the project can run on Streamlit Community Cloud
+without requiring Earth Engine credentials. Landsat Collection 2 Level 2 scenes
+are retrieved from the public STAC API operated by Element84
+(`https://earth-search.aws.element84.com`). Each scene is clipped to the area of
+interest, converted to surface reflectance, and NDVI statistics are derived to
+detect vegetation loss.
 """
 
 from __future__ import annotations
@@ -32,7 +34,6 @@ NIR_BAND = "SR_B5"
 RED_BAND = "SR_B4"
 L2_SCALE = 0.0000275
 L2_OFFSET = -0.2
-DEFAULT_MAX_CLOUD_COVER = 20
 
 
 @dataclass
@@ -46,25 +47,27 @@ class LandsatScene:
 
 
 class DeforestationDetector:
-    """Detect and analyze deforestation using public Landsat imagery."""
-
-    def __init__(
-        self,
-        start_year: int = 2015,
-        end_year: int = 2024,
-        *,
-        max_cloud_cover: Optional[int] = None,
-        stac_url: str = STAC_API_URL,
-        stac_client: Optional[Client] = None,
-    ) -> None:
+    """
+    A class to detect and analyze deforestation using Google Earth Engine
+    and NDVI time series analysis.
+    """
+    
+    def __init__(self, start_year=2015, end_year=2024, credentials=None):
+        """
+        Initialize the DeforestationDetector.
+        
+        Parameters:
+        -----------
+        start_year : int
+            Starting year for analysis
+        end_year : int
+            Ending year for analysis
+        """
         self.start_year = start_year
         self.end_year = end_year
         self.start_date = f"{start_year}-01-01"
         self.end_date = f"{end_year}-12-31"
-        if max_cloud_cover is None:
-            max_cloud_cover = DEFAULT_MAX_CLOUD_COVER
         self.max_cloud_cover = max_cloud_cover
-
         self.geod = pyproj.Geod(ellps="WGS84")
         self.client = stac_client or Client.open(stac_url)
 
@@ -119,24 +122,30 @@ class DeforestationDetector:
         """Read a band as a masked array clipped to the polygon."""
 
         try:
-            with rasterio.Env(AWS_REQUEST_PAYER="requester"):
-                with rasterio.open(href) as src:
-                    nodata = src.nodata
-                    clipped, _ = mask(src, [mapping(polygon)], crop=True)
-        except RasterioIOError as exc:
-            raise RuntimeError(f"Unable to read raster asset {href}") from exc
-
-        data = clipped.astype(np.float32)[0]
-
-        if nodata is not None:
-            data = np.where(data == nodata, np.nan, data)
-
-        data[data <= -9999] = np.nan
-        return data
-
-    def _calculate_scene_ndvi(self, scene: LandsatScene, polygon: Polygon) -> Optional[float]:
-        """Return mean NDVI for a single Landsat scene."""
-
+            if credentials is not None:
+                ee.Initialize(credentials)
+            else:
+                ee.Initialize()
+            print("✓ Google Earth Engine initialized successfully")
+        except Exception as e:
+            print("✗ Error initializing Earth Engine. Please authenticate:")
+            print("  Run: ee.Authenticate()")
+            raise e
+    
+    def load_locations_from_csv(self, csv_path):
+        """
+        Load location coordinates from a CSV file.
+        
+        Parameters:
+        -----------
+        csv_path : str
+            Path to CSV file with columns: location_name, latitude, longitude
+            
+        Returns:
+        --------
+        pandas.DataFrame
+            DataFrame with location information
+        """
         try:
             nir = self._read_band_array(scene.nir_href, polygon)
             red = self._read_band_array(scene.red_href, polygon)
@@ -220,20 +229,22 @@ class DeforestationDetector:
             "deforestation_detected": deforestation_detected,
             "annual_means": annual_means,
         }
-
-    def plot_ndvi_time_series(
-        self,
-        df_dict: Dict[str, pd.DataFrame],
-        save_path: Optional[str] = None,
-        show: bool = True,
-    ):
-        """Create visualization of NDVI time series for multiple locations."""
-
-        if not df_dict:
-            raise ValueError("No NDVI data provided for plotting")
-
-        fig, axes = plt.subplots(len(df_dict), 1, figsize=(14, 6 * len(df_dict)))
-
+        
+        return results
+    
+    def plot_ndvi_time_series(self, df_dict, save_path=None, show=True):
+        """
+        Create visualization of NDVI time series for multiple locations.
+        
+        Parameters:
+        -----------
+        df_dict : dict
+            Dictionary with location names as keys and DataFrames as values
+        save_path : str, optional
+            Path to save the plot
+        """
+        fig, axes = plt.subplots(len(df_dict), 1, figsize=(14, 6*len(df_dict)))
+        
         if len(df_dict) == 1:
             axes = [axes]
 
@@ -302,30 +313,50 @@ class DeforestationDetector:
 
             ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
             ax.xaxis.set_major_locator(mdates.YearLocator())
-            plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha="right")
-
+            plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right')
+        
         fig.tight_layout()
 
         if save_path:
-            fig.savefig(save_path, dpi=300, bbox_inches="tight")
+            fig.savefig(save_path, dpi=300, bbox_inches='tight')
             print(f"\n💾 Plot saved to: {save_path}")
 
         if show:
             plt.show()
 
         return fig
-
-    def create_interactive_map(self, locations_df: pd.DataFrame, ndvi_data_dict: Dict[str, pd.DataFrame]):
-        """Create an interactive map showing the locations and their status."""
-
-        center_lat = locations_df["latitude"].mean()
-        center_lon = locations_df["longitude"].mean()
-
-        m = folium.Map(location=[center_lat, center_lon], zoom_start=7, tiles="OpenStreetMap")
-
-        for _, row in locations_df.iterrows():
-            location_name = row["location_name"]
-
+    
+    def create_interactive_map(self, locations_df, ndvi_data_dict):
+        """
+        Create an interactive map showing the locations and their status.
+        
+        Parameters:
+        -----------
+        locations_df : pandas.DataFrame
+            DataFrame with location information
+        ndvi_data_dict : dict
+            Dictionary with NDVI time series data
+            
+        Returns:
+        --------
+        folium.Map
+            Interactive map object
+        """
+        # Calculate center point
+        center_lat = locations_df['latitude'].mean()
+        center_lon = locations_df['longitude'].mean()
+        
+        # Create map
+        m = folium.Map(
+            location=[center_lat, center_lon],
+            zoom_start=7,
+            tiles='OpenStreetMap'
+        )
+        
+        # Add markers for each location
+        for idx, row in locations_df.iterrows():
+            location_name = row['location_name']
+            
             if location_name in ndvi_data_dict and not ndvi_data_dict[location_name].empty:
                 analysis = self.analyze_deforestation(ndvi_data_dict[location_name])
                 color = "red" if analysis["deforestation_detected"] else "green"

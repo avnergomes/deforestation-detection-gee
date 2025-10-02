@@ -9,8 +9,7 @@ from deforestation_detector import DeforestationDetector
 
 
 def main() -> None:
-    # Accept up to 25% cloud cover to keep the example concise.
-    detector = DeforestationDetector(start_year=2018, end_year=2024, max_cloud_cover=25)
+    detector = DeforestationDetector(start_year=2018, end_year=2024)
 
     locations = [
         {"name": "Logging Area", "lat": 44.2145, "lon": -122.1567},
