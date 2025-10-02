@@ -106,23 +106,9 @@ When running on Streamlit Community Cloud, add your Google Earth Engine service 
 credentials to `st.secrets` using the keys `GEE_SERVICE_ACCOUNT` and `GEE_PRIVATE_KEY`.
 If no CSV is uploaded, the app falls back to the bundled `locations.csv` example.
 
-### Advanced Usage
-
-#### Customize Analysis Period
-
-```python
-from deforestation_detector import DeforestationDetector
-
-# Analyze different time period
-detector = DeforestationDetector(start_year=2010, end_year=2023)
-```
-
-#### Adjust Buffer Size
-
-```python
-# Create 10km buffer instead of default 5km
-geometry = detector.create_buffer_polygon(latitude, longitude, buffer_km=10)
-```
+   ```python
+   from deforestation_detector import DeforestationDetector
+   import pandas as pd
 
    detector = DeforestationDetector(start_year=2015, end_year=2024)
    locations = pd.read_csv("locations.csv")
