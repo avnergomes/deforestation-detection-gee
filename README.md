@@ -93,6 +93,19 @@ deforestation-detection-gee/
 
 2. **Run your custom analysis**:
 
+### Streamlit App
+
+Deploy the interactive dashboard locally or on Streamlit Community Cloud:
+
+```bash
+pip install -r requirements.txt
+streamlit run streamlit_app.py
+```
+
+When running on Streamlit Community Cloud, add your Google Earth Engine service account
+credentials to `st.secrets` using the keys `GEE_SERVICE_ACCOUNT` and `GEE_PRIVATE_KEY`.
+If no CSV is uploaded, the app falls back to the bundled `locations.csv` example.
+
    ```python
    from deforestation_detector import DeforestationDetector
    import pandas as pd
