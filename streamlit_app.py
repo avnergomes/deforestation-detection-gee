@@ -1,9 +1,6 @@
 """Streamlit interface for the deforestation detection workflow."""
 
-from typing import Dict, Optional
-
-import ee
-import inspect
+from typing import Dict
 
 import pandas as pd
 import streamlit as st
@@ -28,17 +25,6 @@ def _load_locations(upload) -> pd.DataFrame:
     return df[REQUIRED_COLUMNS + [col for col in df.columns if col not in REQUIRED_COLUMNS]]
 
 
-def _get_ee_credentials() -> Optional[ee.ServiceAccountCredentials]:
-    """Fetch Google Earth Engine credentials from Streamlit secrets if available."""
-    service_account = st.secrets.get("GEE_SERVICE_ACCOUNT")
-    private_key = st.secrets.get("GEE_PRIVATE_KEY")
-
-    if service_account and private_key:
-        return ee.ServiceAccountCredentials(service_account, key_data=private_key)
-
-    return None
-
-
 def _run_analysis(detector: DeforestationDetector, locations: pd.DataFrame, buffer_km: float) -> Dict[str, pd.DataFrame]:
     """Execute the NDVI extraction workflow for each location."""
     ndvi_data: Dict[str, pd.DataFrame] = {}
@@ -50,7 +36,9 @@ def _run_analysis(detector: DeforestationDetector, locations: pd.DataFrame, buff
     progress_text = st.empty()
     progress_bar = st.progress(0)
 
-    for idx, row in locations.iterrows():
+    total_locations = len(locations)
+
+    for idx, (_, row) in enumerate(locations.iterrows(), start=1):
         location_name = row["location_name"]
         latitude = float(row["latitude"])
         longitude = float(row["longitude"])
@@ -59,7 +47,7 @@ def _run_analysis(detector: DeforestationDetector, locations: pd.DataFrame, buff
         geometry = detector.create_buffer_polygon(latitude, longitude, buffer_km=buffer_km)
         ndvi_df = detector.extract_ndvi_time_series(geometry, location_name)
         ndvi_data[location_name] = ndvi_df
-        progress_bar.progress((idx + 1) / len(locations))
+        progress_bar.progress(idx / total_locations)
 
     progress_text.markdown("✅ Processing complete")
     progress_bar.empty()
@@ -128,35 +116,15 @@ if run_button:
         st.error(f"Unable to read locations CSV: {exc}")
         st.stop()
 
-    credentials = _get_ee_credentials()
-
-    detector_kwargs = {
-        "start_year": int(start_year),
-        "end_year": int(end_year),
-    }
-
-    if credentials is not None:
-        init_parameters = inspect.signature(DeforestationDetector.__init__).parameters
-        if "credentials" in init_parameters:
-            detector_kwargs["credentials"] = credentials
-        else:  # pragma: no cover - depends on installed package version
-            st.warning(
-                "This version of DeforestationDetector does not support passing Google "
-                "Earth Engine credentials directly. The app will attempt to initialize "
-                "Earth Engine using the default authentication flow."
-            )
-
     try:
-        detector = DeforestationDetector(**detector_kwargs)
-    except Exception as exc:  # pragma: no cover - depends on runtime auth
-        st.error(
-            "Failed to initialize Google Earth Engine. "
-            "Ensure credentials are configured in Streamlit secrets or authenticate locally."
+        detector = DeforestationDetector(
+            start_year=int(start_year),
+            end_year=int(end_year),
         )
+    except Exception as exc:  # pragma: no cover - depends on runtime auth
+        st.error("Failed to prepare the Landsat client. Please try again later.")
         st.exception(exc)
         st.stop()
-
-    st.success("Google Earth Engine initialized successfully")
 
     ndvi_results = _run_analysis(detector, locations_df, buffer_km=float(buffer_km))
 
