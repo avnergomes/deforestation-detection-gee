@@ -3,6 +3,8 @@
 from typing import Dict, Optional
 
 import ee
+import inspect
+
 import pandas as pd
 import streamlit as st
 from streamlit_folium import st_folium
@@ -128,12 +130,24 @@ if run_button:
 
     credentials = _get_ee_credentials()
 
+    detector_kwargs = {
+        "start_year": int(start_year),
+        "end_year": int(end_year),
+    }
+
+    if credentials is not None:
+        init_parameters = inspect.signature(DeforestationDetector.__init__).parameters
+        if "credentials" in init_parameters:
+            detector_kwargs["credentials"] = credentials
+        else:  # pragma: no cover - depends on installed package version
+            st.warning(
+                "This version of DeforestationDetector does not support passing Google "
+                "Earth Engine credentials directly. The app will attempt to initialize "
+                "Earth Engine using the default authentication flow."
+            )
+
     try:
-        detector = DeforestationDetector(
-            start_year=int(start_year),
-            end_year=int(end_year),
-            credentials=credentials,
-        )
+        detector = DeforestationDetector(**detector_kwargs)
     except Exception as exc:  # pragma: no cover - depends on runtime auth
         st.error(
             "Failed to initialize Google Earth Engine. "
