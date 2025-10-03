@@ -14,6 +14,7 @@ import pandas as pd
 import pyproj
 import rasterio
 from pystac_client import Client
+from pystac_client.exceptions import APIError
 from rasterio.errors import RasterioIOError
 from rasterio.mask import mask
 from shapely.geometry import Polygon, mapping
@@ -79,15 +80,44 @@ class DeforestationDetector:
     # ------------------------------------------------------------------
     # Landsat retrieval and processing
     # ------------------------------------------------------------------
+    def _select_asset_href(self, asset) -> str:
+        """Return an HTTP-accessible href for a STAC asset."""
+
+        href = getattr(asset, "href", "") or ""
+
+        alternates = getattr(asset, "extra_fields", {}).get("alternate", [])
+        if isinstance(alternates, dict):
+            alternates = [alternates]
+        for alternate in alternates:
+            alt_href = alternate.get("href")
+            if isinstance(alt_href, str) and alt_href.startswith("http"):
+                return alt_href
+
+        s3_prefix_map = {
+            "s3://usgs-landsat/": "https://landsatlook.usgs.gov/data/",
+            "s3://landsat-c2/": "https://landsatlook.usgs.gov/data/",
+            "s3://landsat-pds/": "https://landsat-pds.s3.amazonaws.com/",
+        }
+        for prefix, replacement in s3_prefix_map.items():
+            if href.startswith(prefix):
+                return href.replace(prefix, replacement)
+
+        return href
+
     def _search_landsat_scenes(self, polygon: Polygon) -> List[LandsatScene]:
         """Query the STAC API for Landsat scenes covering ``polygon``."""
 
-        search = self.client.search(
-            collections=[LANDSAT_COLLECTION],
-            datetime=f"{self.start_date}/{self.end_date}",
-            query={"eo:cloud_cover": {"lt": self.max_cloud_cover}},
-            intersects=mapping(polygon),
-        )
+        try:
+            search = self.client.search(
+                collections=[LANDSAT_COLLECTION],
+                datetime=f"{self.start_date}/{self.end_date}",
+                query={"eo:cloud_cover": {"lt": self.max_cloud_cover}},
+                intersects=mapping(polygon),
+            )
+        except APIError as exc:
+            raise RuntimeError(
+                "Unable to query the Landsat STAC endpoint."
+            ) from exc
 
         items = list(search.get_items())
         scenes: List[LandsatScene] = []
@@ -97,14 +127,17 @@ class DeforestationDetector:
             if NIR_BAND not in assets or RED_BAND not in assets:
                 continue
 
+            nir_asset = assets[NIR_BAND]
+            red_asset = assets[RED_BAND]
+
             scenes.append(
                 LandsatScene(
                     id=item.id,
                     datetime=datetime.fromisoformat(
                         item.properties["datetime"].replace("Z", "+00:00")
                     ),
-                    nir_href=assets[NIR_BAND].href,
-                    red_href=assets[RED_BAND].href,
+                    nir_href=self._select_asset_href(nir_asset),
+                    red_href=self._select_asset_href(red_asset),
                 )
             )
 
