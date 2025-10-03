@@ -18,6 +18,7 @@ from pystac_client import Client
 from pystac_client.exceptions import APIError
 from rasterio.errors import RasterioIOError
 from rasterio.mask import mask
+from rasterio.env import Env
 from shapely.geometry import Polygon, mapping
 from shapely.ops import transform as shapely_transform
 
@@ -59,7 +60,7 @@ class DeforestationDetector:
         start_year: int = 2015,
         end_year: int = 2024,
         *,
-        max_cloud_cover: int = 40,
+        max_cloud_cover: int = 70,
         stac_url: str = STAC_API_URL,
         stac_client: Optional[Client] = None,
     ) -> None:
@@ -73,6 +74,10 @@ class DeforestationDetector:
         self.max_cloud_cover = max_cloud_cover
         self.geod = pyproj.Geod(ellps="WGS84")
         self.client = stac_client or Client.open(stac_url)
+        
+        # Set AWS request payer environment variable for Landsat access
+        import os
+        os.environ['AWS_REQUEST_PAYER'] = 'requester'
 
     # ------------------------------------------------------------------
     # Geometry helpers
@@ -133,6 +138,8 @@ class DeforestationDetector:
             ) from exc
 
         items = list(search.get_items())
+        print(f"Found {len(items)} Landsat scenes matching the criteria")
+        
         scenes: List[LandsatScene] = []
 
         for item in items:
@@ -160,23 +167,36 @@ class DeforestationDetector:
             )
 
         scenes.sort(key=lambda scene: scene.datetime)
+        print(f"Prepared {len(scenes)} scenes for NDVI calculation")
         return scenes
 
     def _read_band_array(self, href: str, polygon: Polygon) -> np.ndarray:
         """Read a single Landsat band clipped to ``polygon`` as a float array."""
 
+        # Set up rasterio environment with AWS request payer
+        env_options = {
+            'AWS_REQUEST_PAYER': 'requester',
+            'GDAL_HTTP_MULTIRANGE': 'YES',
+            'GDAL_HTTP_MERGE_CONSECUTIVE_RANGES': 'YES',
+            'GDAL_DISABLE_READDIR_ON_OPEN': 'EMPTY_DIR',
+            'CPL_VSIL_CURL_ALLOWED_EXTENSIONS': '.tif',
+        }
+
         try:
-            with rasterio.open(href) as src:
-                nodata = src.nodata
-                if src.crs is None:
-                    raise RuntimeError(f"Raster {href} lacks CRS information")
-                transformer = pyproj.Transformer.from_crs(
-                    "EPSG:4326", src.crs, always_xy=True
-                )
-                projected_polygon = shapely_transform(transformer.transform, polygon)
-                data, _ = mask(src, [mapping(projected_polygon)], crop=True)
+            with Env(**env_options):
+                with rasterio.open(href) as src:
+                    nodata = src.nodata
+                    if src.crs is None:
+                        raise RuntimeError(f"Raster {href} lacks CRS information")
+                    transformer = pyproj.Transformer.from_crs(
+                        "EPSG:4326", src.crs, always_xy=True
+                    )
+                    projected_polygon = shapely_transform(transformer.transform, polygon)
+                    data, _ = mask(src, [mapping(projected_polygon)], crop=True)
         except RasterioIOError as exc:  # pragma: no cover - network/local IO
-            raise RuntimeError(f"Unable to read raster {href}") from exc
+            raise RuntimeError(f"Unable to read raster {href}: {exc}") from exc
+        except Exception as exc:
+            raise RuntimeError(f"Unexpected error reading {href}: {exc}") from exc
 
         band = data[0].astype("float32")
         if nodata is not None:
@@ -191,7 +211,8 @@ class DeforestationDetector:
         try:
             nir = self._read_band_array(scene.nir_href, polygon)
             red = self._read_band_array(scene.red_href, polygon)
-        except RuntimeError:
+        except RuntimeError as e:
+            print(f"Warning: Failed to read bands for scene {scene.id}: {e}")
             return None
 
         if nir.shape != red.shape:
@@ -208,8 +229,17 @@ class DeforestationDetector:
             ndvi = (nir_reflectance - red_reflectance) / denominator
 
         ndvi = np.where(np.isfinite(ndvi), ndvi, np.nan)
-        if np.isnan(ndvi).all():
+        
+        # Count valid pixels
+        valid_pixels = np.sum(~np.isnan(ndvi))
+        total_pixels = ndvi.size
+        
+        if valid_pixels == 0:
+            print(f"Warning: No valid pixels for scene {scene.id}")
             return None
+        
+        if valid_pixels < total_pixels * 0.1:  # Less than 10% valid data
+            print(f"Warning: Scene {scene.id} has only {valid_pixels}/{total_pixels} valid pixels ({100*valid_pixels/total_pixels:.1f}%)")
 
         return float(np.nanmean(ndvi))
 
@@ -226,10 +256,18 @@ class DeforestationDetector:
     ) -> Tuple[pd.DataFrame, List[LandsatScene]]:
         """Return the NDVI dataframe and associated Landsat scenes."""
 
+        print(f"\n=== Processing {location_name} ===")
         scenes = self._search_landsat_scenes(geometry)
+        
+        if not scenes:
+            print(f"No scenes found for {location_name}")
+            return pd.DataFrame(columns=["date", "ndvi_mean", "location"]), []
 
         records: List[Dict[str, object]] = []
-        for scene in scenes:
+        successful_scenes = 0
+        
+        for idx, scene in enumerate(scenes):
+            print(f"Processing scene {idx+1}/{len(scenes)}: {scene.id} ({scene.datetime.strftime('%Y-%m-%d')})")
             ndvi_mean = self._calculate_scene_ndvi(scene, geometry)
             if ndvi_mean is None:
                 continue
@@ -240,11 +278,17 @@ class DeforestationDetector:
                     "location": location_name,
                 }
             )
+            successful_scenes += 1
 
+        print(f"Successfully calculated NDVI for {successful_scenes}/{len(scenes)} scenes")
+        
         df = pd.DataFrame(records)
         if not df.empty:
             df["date"] = pd.to_datetime(df["date"])
             df = df.sort_values("date")
+        else:
+            print(f"WARNING: No valid NDVI data extracted for {location_name}")
+            
         return df, scenes
 
     # ------------------------------------------------------------------
@@ -429,7 +473,12 @@ class DeforestationDetector:
         draw = ImageDraw.Draw(image)
         text = timestamp.strftime("%Y")
         font = ImageFont.load_default()
-        text_width, text_height = draw.textsize(text, font=font)
+        
+        # Use textbbox instead of deprecated textsize
+        bbox = draw.textbbox((0, 0), text, font=font)
+        text_width = bbox[2] - bbox[0]
+        text_height = bbox[3] - bbox[1]
+        
         padding = 10
         rect = (
             padding,
