@@ -45,7 +45,13 @@ def _run_analysis(detector: DeforestationDetector, locations: pd.DataFrame, buff
 
         progress_text.markdown(f"**Processing:** {location_name}")
         geometry = detector.create_buffer_polygon(latitude, longitude, buffer_km=buffer_km)
-        ndvi_df = detector.extract_ndvi_time_series(geometry, location_name)
+        try:
+            ndvi_df = detector.extract_ndvi_time_series(geometry, location_name)
+        except RuntimeError as exc:
+            st.warning(
+                f"{location_name}: Failed to retrieve Landsat data ({exc})."
+            )
+            ndvi_df = pd.DataFrame(columns=["date", "ndvi_mean", "location"])
         ndvi_data[location_name] = ndvi_df
         progress_bar.progress(idx / total_locations)
 

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-import importlib
 from typing import Dict, List, Optional
 
 import folium
@@ -15,9 +14,11 @@ import pandas as pd
 import pyproj
 import rasterio
 from pystac_client import Client
+from pystac_client.exceptions import APIError
 from rasterio.errors import RasterioIOError
 from rasterio.mask import mask
 from shapely.geometry import Polygon, mapping
+from shapely.ops import transform as shapely_transform
 
 STAC_API_URL = "https://earth-search.aws.element84.com/v1"
 LANDSAT_COLLECTION = "landsat-c2-l2"
@@ -48,8 +49,6 @@ class DeforestationDetector:
         max_cloud_cover: int = 40,
         stac_url: str = STAC_API_URL,
         stac_client: Optional[Client] = None,
-        credentials: Optional[object] = None,
-        initialize_earth_engine: bool = True,
     ) -> None:
         if end_year < start_year:
             raise ValueError("end_year must be greater or equal to start_year")
@@ -61,31 +60,6 @@ class DeforestationDetector:
         self.max_cloud_cover = max_cloud_cover
         self.geod = pyproj.Geod(ellps="WGS84")
         self.client = stac_client or Client.open(stac_url)
-        self.credentials = credentials
-
-        if initialize_earth_engine:
-            self._initialize_earth_engine(credentials)
-
-    def _initialize_earth_engine(self, credentials: Optional[object]) -> None:
-        """Initialize the Google Earth Engine client if the package is available."""
-
-        ee_spec = importlib.util.find_spec("ee")
-        if ee_spec is None:
-            if credentials is not None:
-                raise RuntimeError(
-                    "earthengine-api is not installed, but credentials were provided."
-                )
-            return
-
-        ee = importlib.import_module("ee")
-
-        try:
-            if credentials is not None:
-                ee.Initialize(credentials)
-            else:
-                ee.Initialize()
-        except Exception as exc:  # pragma: no cover - depends on auth state
-            raise RuntimeError("Failed to initialize Google Earth Engine") from exc
 
     # ------------------------------------------------------------------
     # Geometry helpers
@@ -106,15 +80,44 @@ class DeforestationDetector:
     # ------------------------------------------------------------------
     # Landsat retrieval and processing
     # ------------------------------------------------------------------
+    def _select_asset_href(self, asset) -> str:
+        """Return an HTTP-accessible href for a STAC asset."""
+
+        href = getattr(asset, "href", "") or ""
+
+        alternates = getattr(asset, "extra_fields", {}).get("alternate", [])
+        if isinstance(alternates, dict):
+            alternates = [alternates]
+        for alternate in alternates:
+            alt_href = alternate.get("href")
+            if isinstance(alt_href, str) and alt_href.startswith("http"):
+                return alt_href
+
+        s3_prefix_map = {
+            "s3://usgs-landsat/": "https://landsatlook.usgs.gov/data/",
+            "s3://landsat-c2/": "https://landsatlook.usgs.gov/data/",
+            "s3://landsat-pds/": "https://landsat-pds.s3.amazonaws.com/",
+        }
+        for prefix, replacement in s3_prefix_map.items():
+            if href.startswith(prefix):
+                return href.replace(prefix, replacement)
+
+        return href
+
     def _search_landsat_scenes(self, polygon: Polygon) -> List[LandsatScene]:
         """Query the STAC API for Landsat scenes covering ``polygon``."""
 
-        search = self.client.search(
-            collections=[LANDSAT_COLLECTION],
-            datetime=f"{self.start_date}/{self.end_date}",
-            query={"eo:cloud_cover": {"lt": self.max_cloud_cover}},
-            intersects=mapping(polygon),
-        )
+        try:
+            search = self.client.search(
+                collections=[LANDSAT_COLLECTION],
+                datetime=f"{self.start_date}/{self.end_date}",
+                query={"eo:cloud_cover": {"lt": self.max_cloud_cover}},
+                intersects=mapping(polygon),
+            )
+        except APIError as exc:
+            raise RuntimeError(
+                "Unable to query the Landsat STAC endpoint."
+            ) from exc
 
         items = list(search.get_items())
         scenes: List[LandsatScene] = []
@@ -124,14 +127,17 @@ class DeforestationDetector:
             if NIR_BAND not in assets or RED_BAND not in assets:
                 continue
 
+            nir_asset = assets[NIR_BAND]
+            red_asset = assets[RED_BAND]
+
             scenes.append(
                 LandsatScene(
                     id=item.id,
                     datetime=datetime.fromisoformat(
                         item.properties["datetime"].replace("Z", "+00:00")
                     ),
-                    nir_href=assets[NIR_BAND].href,
-                    red_href=assets[RED_BAND].href,
+                    nir_href=self._select_asset_href(nir_asset),
+                    red_href=self._select_asset_href(red_asset),
                 )
             )
 
@@ -144,7 +150,13 @@ class DeforestationDetector:
         try:
             with rasterio.open(href) as src:
                 nodata = src.nodata
-                data, _ = mask(src, [mapping(polygon)], crop=True)
+                if src.crs is None:
+                    raise RuntimeError(f"Raster {href} lacks CRS information")
+                transformer = pyproj.Transformer.from_crs(
+                    "EPSG:4326", src.crs, always_xy=True
+                )
+                projected_polygon = shapely_transform(transformer.transform, polygon)
+                data, _ = mask(src, [mapping(projected_polygon)], crop=True)
         except RasterioIOError as exc:  # pragma: no cover - network/local IO
             raise RuntimeError(f"Unable to read raster {href}") from exc
 
