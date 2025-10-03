@@ -17,6 +17,7 @@ from pystac_client import Client
 from rasterio.errors import RasterioIOError
 from rasterio.mask import mask
 from shapely.geometry import Polygon, mapping
+from shapely.ops import transform as shapely_transform
 
 STAC_API_URL = "https://earth-search.aws.element84.com/v1"
 LANDSAT_COLLECTION = "landsat-c2-l2"
@@ -116,7 +117,13 @@ class DeforestationDetector:
         try:
             with rasterio.open(href) as src:
                 nodata = src.nodata
-                data, _ = mask(src, [mapping(polygon)], crop=True)
+                if src.crs is None:
+                    raise RuntimeError(f"Raster {href} lacks CRS information")
+                transformer = pyproj.Transformer.from_crs(
+                    "EPSG:4326", src.crs, always_xy=True
+                )
+                projected_polygon = shapely_transform(transformer.transform, polygon)
+                data, _ = mask(src, [mapping(projected_polygon)], crop=True)
         except RasterioIOError as exc:  # pragma: no cover - network/local IO
             raise RuntimeError(f"Unable to read raster {href}") from exc
 
