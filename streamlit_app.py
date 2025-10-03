@@ -1,12 +1,14 @@
 """Streamlit interface for the deforestation detection workflow."""
 
-from typing import Dict
+from typing import Dict, List, Tuple
 
 import pandas as pd
 import streamlit as st
 from streamlit_folium import st_folium
 
 from deforestation_detector import DeforestationDetector
+from deforestation_detector import LandsatScene
+from shapely.geometry import Polygon
 
 REQUIRED_COLUMNS = ["location_name", "latitude", "longitude"]
 
@@ -25,13 +27,22 @@ def _load_locations(upload) -> pd.DataFrame:
     return df[REQUIRED_COLUMNS + [col for col in df.columns if col not in REQUIRED_COLUMNS]]
 
 
-def _run_analysis(detector: DeforestationDetector, locations: pd.DataFrame, buffer_km: float) -> Dict[str, pd.DataFrame]:
+def _run_analysis(
+    detector: DeforestationDetector, locations: pd.DataFrame, buffer_km: float
+) -> Tuple[
+    Dict[str, pd.DataFrame],
+    Dict[str, List[LandsatScene]],
+    Dict[str, Polygon],
+]:
     """Execute the NDVI extraction workflow for each location."""
+
     ndvi_data: Dict[str, pd.DataFrame] = {}
+    scene_data: Dict[str, List[LandsatScene]] = {}
+    geometries: Dict[str, Polygon] = {}
 
     if locations.empty:
         st.warning("No locations available for analysis.")
-        return ndvi_data
+        return ndvi_data, scene_data, geometries
 
     progress_text = st.empty()
     progress_bar = st.progress(0)
@@ -45,20 +56,25 @@ def _run_analysis(detector: DeforestationDetector, locations: pd.DataFrame, buff
 
         progress_text.markdown(f"**Processing:** {location_name}")
         geometry = detector.create_buffer_polygon(latitude, longitude, buffer_km=buffer_km)
+        geometries[location_name] = geometry
         try:
-            ndvi_df = detector.extract_ndvi_time_series(geometry, location_name)
+            ndvi_df, scenes = detector.extract_ndvi_time_series_and_scenes(
+                geometry, location_name
+            )
         except RuntimeError as exc:
             st.warning(
                 f"{location_name}: Failed to retrieve Landsat data ({exc})."
             )
             ndvi_df = pd.DataFrame(columns=["date", "ndvi_mean", "location"])
+            scenes = []
         ndvi_data[location_name] = ndvi_df
+        scene_data[location_name] = scenes
         progress_bar.progress(idx / total_locations)
 
     progress_text.markdown("✅ Processing complete")
     progress_bar.empty()
 
-    return ndvi_data
+    return ndvi_data, scene_data, geometries
 
 
 def _display_summary(detector: DeforestationDetector, ndvi_data: Dict[str, pd.DataFrame]):
@@ -132,12 +148,46 @@ if run_button:
         st.exception(exc)
         st.stop()
 
-    ndvi_results = _run_analysis(detector, locations_df, buffer_km=float(buffer_km))
+    ndvi_results, scene_results, geometries = _run_analysis(
+        detector, locations_df, buffer_km=float(buffer_km)
+    )
 
     if ndvi_results:
         st.subheader("NDVI Time Series")
         fig = detector.plot_ndvi_time_series(ndvi_results, save_path=None, show=False)
         st.pyplot(fig)
+
+        st.subheader("Landsat Time-lapse")
+        gifs_rendered = False
+        for idx, location_name in enumerate(locations_df["location_name"]):
+            location_label = str(location_name)
+            scenes = scene_results.get(location_name, [])
+            geometry = geometries.get(location_name)
+            if not scenes or geometry is None:
+                st.write(
+                    f"*{location_label}:* No imagery available for time-lapse generation."
+                )
+                continue
+
+            try:
+                gif_bytes = detector.create_time_lapse_gif(geometry, scenes)
+            except RuntimeError as exc:
+                st.warning(f"{location_label}: Unable to create GIF ({exc}).")
+                continue
+
+            gifs_rendered = True
+            st.markdown(f"**{location_label}** ({len(scenes)} scenes)")
+            st.image(gif_bytes, caption="Landsat true colour time-lapse", use_column_width=True)
+            st.download_button(
+                label="Download GIF",
+                data=gif_bytes,
+                file_name=f"{location_label.replace(' ', '_').lower()}_timelapse.gif",
+                mime="image/gif",
+                key=f"download-gif-{idx}-{location_label}",
+            )
+
+        if not gifs_rendered:
+            st.info("No Landsat imagery was available to generate time-lapse animations.")
 
         st.subheader("Interactive Map")
         map_object = detector.create_interactive_map(locations_df, ndvi_results)

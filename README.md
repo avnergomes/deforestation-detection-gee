@@ -110,7 +110,14 @@ streamlit run streamlit_app.py
    results = {}
    for _, row in locations.iterrows():
        geom = detector.create_buffer_polygon(row.latitude, row.longitude, buffer_km=5)
-       results[row.location_name] = detector.extract_ndvi_time_series(geom, row.location_name)
+       ndvi_df, scenes = detector.extract_ndvi_time_series_and_scenes(geom, row.location_name)
+       results[row.location_name] = ndvi_df
+
+       # Optional: export a Landsat true colour time-lapse GIF for each site
+       if scenes:
+           gif_path = f"{row.location_name.replace(' ', '_').lower()}_timelapse.gif"
+           with open(gif_path, "wb") as fh:
+               fh.write(detector.create_time_lapse_gif(geom, scenes))
 
    detector.plot_ndvi_time_series(results)
    ```
@@ -139,6 +146,8 @@ and displays charts, maps, and summary statistics.
   and annual averages.
 - **Summary Table** – Lists statistics per location, highlighting areas with
   significant NDVI decline.
+- **Landsat Time-lapse GIFs** – Show true-colour imagery for each location with
+  the acquisition year overlaid, making it easy to visually inspect change.
 - **Interactive Map** – Uses folium to colour-code locations based on the
   detected trend.
 

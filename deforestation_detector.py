@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Dict, List, Optional
+from io import BytesIO
+from typing import Dict, List, Optional, Tuple
 
 import folium
 import matplotlib.dates as mdates
@@ -20,10 +21,20 @@ from rasterio.mask import mask
 from shapely.geometry import Polygon, mapping
 from shapely.ops import transform as shapely_transform
 
+try:  # Pillow 9.1+ exposes resampling filters via Image.Resampling
+    from PIL import Image, ImageDraw, ImageFont, ImageOps
+except ImportError:  # pragma: no cover - optional dependency at runtime
+    Image = ImageDraw = ImageFont = ImageOps = None  # type: ignore
+    _RESAMPLING_BILINEAR = None
+else:  # pragma: no cover - import-time branch
+    _RESAMPLING_BILINEAR = getattr(Image, "Resampling", Image).BILINEAR
+
 STAC_API_URL = "https://earth-search.aws.element84.com/v1"
 LANDSAT_COLLECTION = "landsat-c2-l2"
 NIR_BAND = "SR_B5"
 RED_BAND = "SR_B4"
+GREEN_BAND = "SR_B3"
+BLUE_BAND = "SR_B2"
 L2_SCALE = 0.0000275
 L2_OFFSET = -0.2
 
@@ -36,6 +47,8 @@ class LandsatScene:
     datetime: datetime
     nir_href: str
     red_href: str
+    green_href: str
+    blue_href: str
 
 
 class DeforestationDetector:
@@ -124,11 +137,14 @@ class DeforestationDetector:
 
         for item in items:
             assets = item.assets
-            if NIR_BAND not in assets or RED_BAND not in assets:
+            required_bands = {NIR_BAND, RED_BAND, GREEN_BAND, BLUE_BAND}
+            if not required_bands.issubset(assets):
                 continue
 
             nir_asset = assets[NIR_BAND]
             red_asset = assets[RED_BAND]
+            green_asset = assets[GREEN_BAND]
+            blue_asset = assets[BLUE_BAND]
 
             scenes.append(
                 LandsatScene(
@@ -138,6 +154,8 @@ class DeforestationDetector:
                     ),
                     nir_href=self._select_asset_href(nir_asset),
                     red_href=self._select_asset_href(red_asset),
+                    green_href=self._select_asset_href(green_asset),
+                    blue_href=self._select_asset_href(blue_asset),
                 )
             )
 
@@ -200,6 +218,14 @@ class DeforestationDetector:
     ) -> pd.DataFrame:
         """Extract NDVI measurements for every Landsat scene that intersects."""
 
+        df, _ = self.extract_ndvi_time_series_and_scenes(geometry, location_name)
+        return df
+
+    def extract_ndvi_time_series_and_scenes(
+        self, geometry: Polygon, location_name: str
+    ) -> Tuple[pd.DataFrame, List[LandsatScene]]:
+        """Return the NDVI dataframe and associated Landsat scenes."""
+
         scenes = self._search_landsat_scenes(geometry)
 
         records: List[Dict[str, object]] = []
@@ -219,7 +245,7 @@ class DeforestationDetector:
         if not df.empty:
             df["date"] = pd.to_datetime(df["date"])
             df = df.sort_values("date")
-        return df
+        return df, scenes
 
     # ------------------------------------------------------------------
     # Analysis and visualisation utilities
@@ -357,6 +383,120 @@ class DeforestationDetector:
         if show:
             plt.show()
         return fig
+
+    def _prepare_true_color_frame(
+        self,
+        red: np.ndarray,
+        green: np.ndarray,
+        blue: np.ndarray,
+        *,
+        frame_size: int,
+    ) -> Optional[Image.Image]:
+        """Create a display-ready RGB image from reflectance bands."""
+
+        if red.shape != green.shape or red.shape != blue.shape:
+            min_rows = min(red.shape[0], green.shape[0], blue.shape[0])
+            min_cols = min(red.shape[1], green.shape[1], blue.shape[1])
+            red = red[:min_rows, :min_cols]
+            green = green[:min_rows, :min_cols]
+            blue = blue[:min_rows, :min_cols]
+
+        stack = np.stack([red, green, blue], axis=-1).astype("float32")
+        stack = stack * L2_SCALE + L2_OFFSET
+        if not np.isfinite(stack).any():
+            return None
+
+        finite_values = stack[np.isfinite(stack)]
+        if finite_values.size == 0:
+            return None
+
+        lower, upper = np.nanpercentile(finite_values, (2, 98))
+        if not np.isfinite(lower) or not np.isfinite(upper) or upper <= lower:
+            lower, upper = 0.0, 0.3
+
+        scaled = (stack - lower) / (upper - lower if upper > lower else 1.0)
+        scaled = np.clip(scaled, 0.0, 1.0)
+        scaled = np.nan_to_num(scaled, nan=0.0)
+
+        rgb_uint8 = (scaled * 255).astype(np.uint8)
+        image = Image.fromarray(rgb_uint8, mode="RGB")
+        image = ImageOps.fit(image, (frame_size, frame_size), method=_RESAMPLING_BILINEAR)
+        return image
+
+    def _annotate_frame(self, image: Image.Image, timestamp: datetime) -> None:
+        """Overlay the acquisition year on the GIF frame."""
+
+        draw = ImageDraw.Draw(image)
+        text = timestamp.strftime("%Y")
+        font = ImageFont.load_default()
+        text_width, text_height = draw.textsize(text, font=font)
+        padding = 10
+        rect = (
+            padding,
+            padding,
+            padding + text_width + 12,
+            padding + text_height + 12,
+        )
+        draw.rectangle(rect, fill=(0, 0, 0))
+        draw.text(
+            (rect[0] + 6, rect[1] + 6),
+            text,
+            font=font,
+            fill=(255, 255, 255),
+        )
+
+    def create_time_lapse_gif(
+        self,
+        polygon: Polygon,
+        scenes: List[LandsatScene],
+        *,
+        frame_size: int = 512,
+        frame_duration_ms: int = 800,
+    ) -> bytes:
+        """Generate a true-colour Landsat GIF for the supplied scenes."""
+
+        if Image is None or ImageOps is None or _RESAMPLING_BILINEAR is None:
+            raise ImportError("Pillow is required to generate Landsat time-lapse GIFs.")
+
+        if not scenes:
+            raise ValueError("scenes must contain at least one LandsatScene")
+
+        frames: List[Image.Image] = []
+
+        for scene in scenes:
+            try:
+                red = self._read_band_array(scene.red_href, polygon)
+                green = self._read_band_array(scene.green_href, polygon)
+                blue = self._read_band_array(scene.blue_href, polygon)
+            except RuntimeError:
+                continue
+
+            frame = self._prepare_true_color_frame(
+                red,
+                green,
+                blue,
+                frame_size=frame_size,
+            )
+            if frame is None:
+                continue
+
+            self._annotate_frame(frame, scene.datetime)
+            frames.append(frame)
+
+        if not frames:
+            raise RuntimeError("Unable to generate GIF frames from the available scenes")
+
+        buffer = BytesIO()
+        frames[0].save(
+            buffer,
+            format="GIF",
+            save_all=True,
+            append_images=frames[1:],
+            duration=frame_duration_ms,
+            loop=0,
+        )
+        buffer.seek(0)
+        return buffer.getvalue()
 
     def create_interactive_map(
         self, locations_df: pd.DataFrame, ndvi_data_dict: Dict[str, pd.DataFrame]
