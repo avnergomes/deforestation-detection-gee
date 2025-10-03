@@ -9,11 +9,9 @@
 ## 📋 Project Overview
 
 This project provides a Python-based workflow for detecting land cover changes
-and deforestation using freely available Landsat imagery. The original solution
-depended on Google Earth Engine, which is not available on Streamlit Community
-Cloud. The codebase now talks directly to the public Landsat Collection 2 Level
-2 archive published on AWS via the Element84 STAC API and computes NDVI locally
-using `rasterio`.
+and deforestation using freely available Landsat imagery. The codebase talks
+directly to the public Landsat Collection 2 Level 2 archive published on AWS via
+the Element84 STAC API and computes NDVI locally using `rasterio`.
 
 ### Key Features
 
@@ -24,8 +22,8 @@ using `rasterio`.
   loss using NDVI trends.
 - ✅ **Interactive Visualizations**: Generates time series plots and interactive
   maps for quick exploration.
-- ✅ **Streamlit Dashboard**: Runs without Earth Engine credentials and is ready
-  for deployment on Streamlit Community Cloud.
+- ✅ **Streamlit Dashboard**: Ready for deployment on Streamlit Community Cloud
+  without proprietary dependencies.
 
 ---
 
@@ -67,7 +65,7 @@ successfully and network access is working.
 ## 📂 Project Structure
 
 ```
-deforestation-detection-gee/
+project-root/
 │
 ├── deforestation_detector.py    # Core Landsat NDVI workflow
 ├── locations.csv                # Sample locations for quick testing
@@ -101,10 +99,6 @@ Deploy the interactive dashboard locally or on Streamlit Community Cloud:
 pip install -r requirements.txt
 streamlit run streamlit_app.py
 ```
-
-When running on Streamlit Community Cloud, add your Google Earth Engine service account
-credentials to `st.secrets` using the keys `GEE_SERVICE_ACCOUNT` and `GEE_PRIVATE_KEY`.
-If no CSV is uploaded, the app falls back to the bundled `locations.csv` example.
 
    ```python
    from deforestation_detector import DeforestationDetector
@@ -160,16 +154,13 @@ threshold by modifying `analyze_deforestation` in `deforestation_detector.py`.
 Scenes are downloaded on demand from AWS. Subsequent runs that reuse the same
 locations and time range benefit from HTTP caching handled by GDAL.
 
-**Can I use Sentinel-2 or another dataset?**  
+**Can I use Sentinel-2 or another dataset?**
 Yes. Update `_search_landsat_scenes` to point to a different STAC collection and
 adjust the band names and scaling factors accordingly.
 
-**Do I need a Google Earth Engine account?**  
-No. All data is accessed through open STAC APIs and processed locally.
-
-**Can I use Sentinel-2 or another dataset?**  
-Yes. Update `_search_landsat_scenes` to point to a different STAC collection and
-adjust the band names and scaling factors accordingly.
+**Do I need special API keys?**
+No. The workflow relies on open STAC endpoints that only require standard HTTP
+access.
 
 ## 🛠️ Troubleshooting
 
