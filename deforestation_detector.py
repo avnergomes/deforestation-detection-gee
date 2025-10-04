@@ -32,13 +32,10 @@ else:  # pragma: no cover - import-time branch
 
 STAC_API_URL = "https://earth-search.aws.element84.com/v1"
 LANDSAT_COLLECTION = "landsat-c2-l2"
-
-# Element84 STAC uses descriptive band names for Landsat Collection 2
-NIR_BAND = "nir08"
-RED_BAND = "red"
-GREEN_BAND = "green"
-BLUE_BAND = "blue"
-
+NIR_BAND = "SR_B5"
+RED_BAND = "SR_B4"
+GREEN_BAND = "SR_B3"
+BLUE_BAND = "SR_B2"
 L2_SCALE = 0.0000275
 L2_OFFSET = -0.2
 
@@ -77,10 +74,6 @@ class DeforestationDetector:
         self.max_cloud_cover = max_cloud_cover
         self.geod = pyproj.Geod(ellps="WGS84")
         self.client = stac_client or Client.open(stac_url)
-        
-        # Set AWS request payer environment variable for Landsat access
-        import os
-        os.environ['AWS_REQUEST_PAYER'] = 'requester'
 
     # ------------------------------------------------------------------
     # Geometry helpers
@@ -148,9 +141,8 @@ class DeforestationDetector:
 
         for item in items:
             assets = item.assets
-            
-            # Check if all required bands are present
-            if not all(band in assets for band in required_bands):
+            required_bands = {NIR_BAND, RED_BAND, GREEN_BAND, BLUE_BAND}
+            if not required_bands.issubset(assets):
                 continue
 
             nir_asset = assets[NIR_BAND]
@@ -175,8 +167,10 @@ class DeforestationDetector:
         print(f"Prepared {len(scenes)} scenes for NDVI calculation")
         return scenes
 
-    def _read_band_array(self, href: str, polygon: Polygon) -> np.ndarray:
-        """Read a single Landsat band clipped to ``polygon`` as a float array."""
+    def _read_band_array(
+        self, href: str, polygon: Polygon
+    ) -> Tuple[np.ndarray, float, float]:
+        """Read a single Landsat band clipped to ``polygon`` and return scaling."""
 
         # Set up rasterio environment with AWS request payer
         env_options = {
@@ -188,36 +182,52 @@ class DeforestationDetector:
         }
 
         try:
-            with Env(**env_options):
-                with rasterio.open(href) as src:
-                    nodata = src.nodata
-                    if src.crs is None:
-                        raise RuntimeError(f"Raster {href} lacks CRS information")
-                    transformer = pyproj.Transformer.from_crs(
-                        "EPSG:4326", src.crs, always_xy=True
-                    )
-                    projected_polygon = shapely_transform(transformer.transform, polygon)
-                    data, _ = mask(src, [mapping(projected_polygon)], crop=True)
+            with rasterio.open(href) as src:
+                nodata = src.nodata
+                if src.crs is None:
+                    raise RuntimeError(f"Raster {href} lacks CRS information")
+                transformer = pyproj.Transformer.from_crs(
+                    "EPSG:4326", src.crs, always_xy=True
+                )
+                projected_polygon = shapely_transform(transformer.transform, polygon)
+                data, _ = mask(
+                    src,
+                    [mapping(projected_polygon)],
+                    crop=True,
+                    filled=False,
+                )
+                scale = (
+                    float(src.scales[0])
+                    if src.scales and src.scales[0] is not None
+                    else L2_SCALE
+                )
+                offset = (
+                    float(src.offsets[0])
+                    if src.offsets and src.offsets[0] is not None
+                    else L2_OFFSET
+                )
         except RasterioIOError as exc:  # pragma: no cover - network/local IO
             raise RuntimeError(f"Unable to read raster {href}: {exc}") from exc
         except Exception as exc:
             raise RuntimeError(f"Unexpected error reading {href}: {exc}") from exc
 
-        band = data[0].astype("float32")
+        band = data[0]
+        if isinstance(band, np.ma.MaskedArray):
+            band = band.filled(np.nan)
+
+        band = band.astype("float32")
         if nodata is not None:
-            band[band == nodata] = np.nan
-        band = np.where(band == -9999, np.nan, band)
-        band = np.where(band == 0, np.nan, band)
-        return band
+            band = np.where(np.isclose(band, nodata), np.nan, band)
+        band = np.where(np.isclose(band, -9999), np.nan, band)
+        return band, scale, offset
 
     def _calculate_scene_ndvi(self, scene: LandsatScene, polygon: Polygon) -> Optional[float]:
         """Return the mean NDVI for ``scene`` over ``polygon``."""
 
         try:
-            nir = self._read_band_array(scene.nir_href, polygon)
-            red = self._read_band_array(scene.red_href, polygon)
-        except RuntimeError as e:
-            print(f"Warning: Failed to read bands for scene {scene.id}: {e}")
+            nir, nir_scale, nir_offset = self._read_band_array(scene.nir_href, polygon)
+            red, red_scale, red_offset = self._read_band_array(scene.red_href, polygon)
+        except RuntimeError:
             return None
 
         if nir.shape != red.shape:
@@ -226,8 +236,8 @@ class DeforestationDetector:
             nir = nir[:min_rows, :min_cols]
             red = red[:min_rows, :min_cols]
 
-        nir_reflectance = nir * L2_SCALE + L2_OFFSET
-        red_reflectance = red * L2_SCALE + L2_OFFSET
+        nir_reflectance = nir * nir_scale + nir_offset
+        red_reflectance = red * red_scale + red_offset
 
         denominator = nir_reflectance + red_reflectance
         with np.errstate(divide="ignore", invalid="ignore"):
@@ -261,7 +271,6 @@ class DeforestationDetector:
     ) -> Tuple[pd.DataFrame, List[LandsatScene]]:
         """Return the NDVI dataframe and associated Landsat scenes."""
 
-        print(f"\n=== Processing {location_name} ===")
         scenes = self._search_landsat_scenes(geometry)
         
         if not scenes:
@@ -291,9 +300,6 @@ class DeforestationDetector:
         if not df.empty:
             df["date"] = pd.to_datetime(df["date"])
             df = df.sort_values("date")
-        else:
-            print(f"WARNING: No valid NDVI data extracted for {location_name}")
-            
         return df, scenes
 
     # ------------------------------------------------------------------
@@ -435,23 +441,35 @@ class DeforestationDetector:
 
     def _prepare_true_color_frame(
         self,
-        red: np.ndarray,
-        green: np.ndarray,
-        blue: np.ndarray,
+        red_reflectance: np.ndarray,
+        green_reflectance: np.ndarray,
+        blue_reflectance: np.ndarray,
         *,
         frame_size: int,
     ) -> Optional[Image.Image]:
         """Create a display-ready RGB image from reflectance bands."""
 
-        if red.shape != green.shape or red.shape != blue.shape:
-            min_rows = min(red.shape[0], green.shape[0], blue.shape[0])
-            min_cols = min(red.shape[1], green.shape[1], blue.shape[1])
-            red = red[:min_rows, :min_cols]
-            green = green[:min_rows, :min_cols]
-            blue = blue[:min_rows, :min_cols]
+        if (
+            red_reflectance.shape != green_reflectance.shape
+            or red_reflectance.shape != blue_reflectance.shape
+        ):
+            min_rows = min(
+                red_reflectance.shape[0],
+                green_reflectance.shape[0],
+                blue_reflectance.shape[0],
+            )
+            min_cols = min(
+                red_reflectance.shape[1],
+                green_reflectance.shape[1],
+                blue_reflectance.shape[1],
+            )
+            red_reflectance = red_reflectance[:min_rows, :min_cols]
+            green_reflectance = green_reflectance[:min_rows, :min_cols]
+            blue_reflectance = blue_reflectance[:min_rows, :min_cols]
 
-        stack = np.stack([red, green, blue], axis=-1).astype("float32")
-        stack = stack * L2_SCALE + L2_OFFSET
+        stack = np.stack(
+            [red_reflectance, green_reflectance, blue_reflectance], axis=-1
+        ).astype("float32")
         if not np.isfinite(stack).any():
             return None
 
@@ -478,12 +496,7 @@ class DeforestationDetector:
         draw = ImageDraw.Draw(image)
         text = timestamp.strftime("%Y")
         font = ImageFont.load_default()
-        
-        # Use textbbox instead of deprecated textsize
-        bbox = draw.textbbox((0, 0), text, font=font)
-        text_width = bbox[2] - bbox[0]
-        text_height = bbox[3] - bbox[1]
-        
+        text_width, text_height = draw.textsize(text, font=font)
         padding = 10
         rect = (
             padding,
@@ -519,16 +532,22 @@ class DeforestationDetector:
 
         for scene in scenes:
             try:
-                red = self._read_band_array(scene.red_href, polygon)
-                green = self._read_band_array(scene.green_href, polygon)
-                blue = self._read_band_array(scene.blue_href, polygon)
+                red, red_scale, red_offset = self._read_band_array(
+                    scene.red_href, polygon
+                )
+                green, green_scale, green_offset = self._read_band_array(
+                    scene.green_href, polygon
+                )
+                blue, blue_scale, blue_offset = self._read_band_array(
+                    scene.blue_href, polygon
+                )
             except RuntimeError:
                 continue
 
             frame = self._prepare_true_color_frame(
-                red,
-                green,
-                blue,
+                red * red_scale + red_offset,
+                green * green_scale + green_offset,
+                blue * blue_scale + blue_offset,
                 frame_size=frame_size,
             )
             if frame is None:
