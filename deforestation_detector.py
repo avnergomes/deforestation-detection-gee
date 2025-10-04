@@ -41,6 +41,11 @@ LANDSAT_BAND_PRIORITY = (
     ("SR_B5", "SR_B4", "SR_B3", "SR_B2"),  # Landsat 8/9
     ("SR_B4", "SR_B3", "SR_B2", "SR_B1"),  # Landsat 4/5/7
 )
+# Historical constants retained for backwards compatibility with older
+# application code paths. They map to the Landsat 8/9 band layout, which the
+# detector still supports alongside the dynamic mission-aware resolution
+# implemented below.
+NIR_BAND, RED_BAND, GREEN_BAND, BLUE_BAND = LANDSAT_BAND_PRIORITY[0]
 L2_SCALE = 0.0000275
 L2_OFFSET = -0.2
 
@@ -223,6 +228,10 @@ class DeforestationDetector:
             raise RuntimeError(f"Unable to read raster {href}: {exc}") from exc
         except Exception as exc:
             raise RuntimeError(f"Unexpected error reading {href}: {exc}") from exc
+
+        band = data[0]
+        if isinstance(band, np.ma.MaskedArray):
+            band = band.filled(np.nan)
 
         band = data[0]
         if isinstance(band, np.ma.MaskedArray):
