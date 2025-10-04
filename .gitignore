@@ -4,6 +4,9 @@ __pycache__/
 *$py.class
 *.so
 .Python
+env/
+venv/
+ENV/
 build/
 develop-eggs/
 dist/
@@ -20,37 +23,35 @@ wheels/
 .installed.cfg
 *.egg
 
-# Virtual Environments
-venv/
-ENV/
-env/
-.venv
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
 
-# IDE
+# Output files
+ndvi_time_series.png
+deforestation_map.html
+simple_results.png
+*.html
+*.png
+
+# Earth Engine credentials
+.earthengine/
+earthengine-api/
+
+# IDEs
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
+
+# OS
 .DS_Store
+Thumbs.db
 
-# Jupyter Notebook
-.ipynb_checkpoints
-*.ipynb
-
-# Output files (generated)
-ndvi_time_series.png
-deforestation_map.html
-simple_results.png
-*.csv.bak
-
-# Earth Engine credentials
-.config/earthengine/
-credentials
+# Data files (keep template, ignore user data)
+# Uncomment if you want to ignore user CSV files
+# locations_*.csv
 
 # Logs
 *.log
-
-# OS
-Thumbs.db
-.DS_Store

@@ -18,6 +18,7 @@ from pystac_client import Client
 from pystac_client.exceptions import APIError
 from rasterio.errors import RasterioIOError
 from rasterio.mask import mask
+from rasterio.env import Env
 from shapely.geometry import Polygon, mapping
 from shapely.ops import transform as shapely_transform
 
@@ -64,7 +65,7 @@ class DeforestationDetector:
         start_year: int = 2015,
         end_year: int = 2024,
         *,
-        max_cloud_cover: int = 40,
+        max_cloud_cover: int = 70,
         stac_url: str = STAC_API_URL,
         stac_client: Optional[Client] = None,
     ) -> None:
@@ -155,7 +156,10 @@ class DeforestationDetector:
             ) from exc
 
         items = list(search.get_items())
+        print(f"Found {len(items)} Landsat scenes matching the criteria")
+        
         scenes: List[LandsatScene] = []
+        required_bands = [NIR_BAND, RED_BAND, GREEN_BAND, BLUE_BAND]
 
         for item in items:
             assets = item.assets
@@ -182,6 +186,7 @@ class DeforestationDetector:
             )
 
         scenes.sort(key=lambda scene: scene.datetime)
+        print(f"Prepared {len(scenes)} scenes for NDVI calculation")
         return scenes
 
     def _read_band_array(
@@ -215,7 +220,13 @@ class DeforestationDetector:
                     else L2_OFFSET
                 )
         except RasterioIOError as exc:  # pragma: no cover - network/local IO
-            raise RuntimeError(f"Unable to read raster {href}") from exc
+            raise RuntimeError(f"Unable to read raster {href}: {exc}") from exc
+        except Exception as exc:
+            raise RuntimeError(f"Unexpected error reading {href}: {exc}") from exc
+
+        band = data[0]
+        if isinstance(band, np.ma.MaskedArray):
+            band = band.filled(np.nan)
 
         band = data[0]
         if isinstance(band, np.ma.MaskedArray):
@@ -250,8 +261,17 @@ class DeforestationDetector:
             ndvi = (nir_reflectance - red_reflectance) / denominator
 
         ndvi = np.where(np.isfinite(ndvi), ndvi, np.nan)
-        if np.isnan(ndvi).all():
+        
+        # Count valid pixels
+        valid_pixels = np.sum(~np.isnan(ndvi))
+        total_pixels = ndvi.size
+        
+        if valid_pixels == 0:
+            print(f"Warning: No valid pixels for scene {scene.id}")
             return None
+        
+        if valid_pixels < total_pixels * 0.1:  # Less than 10% valid data
+            print(f"Warning: Scene {scene.id} has only {valid_pixels}/{total_pixels} valid pixels ({100*valid_pixels/total_pixels:.1f}%)")
 
         return float(np.nanmean(ndvi))
 
@@ -269,9 +289,16 @@ class DeforestationDetector:
         """Return the NDVI dataframe and associated Landsat scenes."""
 
         scenes = self._search_landsat_scenes(geometry)
+        
+        if not scenes:
+            print(f"No scenes found for {location_name}")
+            return pd.DataFrame(columns=["date", "ndvi_mean", "location"]), []
 
         records: List[Dict[str, object]] = []
-        for scene in scenes:
+        successful_scenes = 0
+        
+        for idx, scene in enumerate(scenes):
+            print(f"Processing scene {idx+1}/{len(scenes)}: {scene.id} ({scene.datetime.strftime('%Y-%m-%d')})")
             ndvi_mean = self._calculate_scene_ndvi(scene, geometry)
             if ndvi_mean is None:
                 continue
@@ -282,7 +309,10 @@ class DeforestationDetector:
                     "location": location_name,
                 }
             )
+            successful_scenes += 1
 
+        print(f"Successfully calculated NDVI for {successful_scenes}/{len(scenes)} scenes")
+        
         df = pd.DataFrame(records)
         if not df.empty:
             df["date"] = pd.to_datetime(df["date"])
