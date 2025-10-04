@@ -32,10 +32,15 @@ else:  # pragma: no cover - import-time branch
 
 STAC_API_URL = "https://earth-search.aws.element84.com/v1"
 LANDSAT_COLLECTION = "landsat-c2-l2"
-NIR_BAND = "SR_B5"
-RED_BAND = "SR_B4"
-GREEN_BAND = "SR_B3"
-BLUE_BAND = "SR_B2"
+# Landsat surface reflectance assets differ between sensors. Later missions
+# (Landsat 8/9) expose the visible bands as B2/B3/B4 with NIR as B5, whereas
+# earlier sensors (Landsat 4/5/7) expose them as B1/B2/B3 with NIR as B4.  The
+# detector dynamically selects the appropriate set of bands for each scene so it
+# can operate across the full 1984–present archive.
+LANDSAT_BAND_PRIORITY = (
+    ("SR_B5", "SR_B4", "SR_B3", "SR_B2"),  # Landsat 8/9
+    ("SR_B4", "SR_B3", "SR_B2", "SR_B1"),  # Landsat 4/5/7
+)
 L2_SCALE = 0.0000275
 L2_OFFSET = -0.2
 
@@ -118,6 +123,23 @@ class DeforestationDetector:
 
         return href
 
+    def _resolve_band_hrefs(self, assets) -> Optional[Dict[str, object]]:
+        """Return the set of STAC assets that contain the RGB + NIR bands."""
+
+        for nir_band, red_band, green_band, blue_band in LANDSAT_BAND_PRIORITY:
+            required = {nir_band, red_band, green_band, blue_band}
+            if not required.issubset(assets):
+                continue
+
+            return {
+                "nir": assets[nir_band],
+                "red": assets[red_band],
+                "green": assets[green_band],
+                "blue": assets[blue_band],
+            }
+
+        return None
+
     def _search_landsat_scenes(self, polygon: Polygon) -> List[LandsatScene]:
         """Query the STAC API for Landsat scenes covering ``polygon``."""
 
@@ -141,14 +163,14 @@ class DeforestationDetector:
 
         for item in items:
             assets = item.assets
-            required_bands = {NIR_BAND, RED_BAND, GREEN_BAND, BLUE_BAND}
-            if not required_bands.issubset(assets):
+            band_hrefs = self._resolve_band_hrefs(assets)
+            if band_hrefs is None:
                 continue
 
-            nir_asset = assets[NIR_BAND]
-            red_asset = assets[RED_BAND]
-            green_asset = assets[GREEN_BAND]
-            blue_asset = assets[BLUE_BAND]
+            nir_asset = band_hrefs["nir"]
+            red_asset = band_hrefs["red"]
+            green_asset = band_hrefs["green"]
+            blue_asset = band_hrefs["blue"]
 
             scenes.append(
                 LandsatScene(
@@ -171,15 +193,6 @@ class DeforestationDetector:
         self, href: str, polygon: Polygon
     ) -> Tuple[np.ndarray, float, float]:
         """Read a single Landsat band clipped to ``polygon`` and return scaling."""
-
-        # Set up rasterio environment with AWS request payer
-        env_options = {
-            'AWS_REQUEST_PAYER': 'requester',
-            'GDAL_HTTP_MULTIRANGE': 'YES',
-            'GDAL_HTTP_MERGE_CONSECUTIVE_RANGES': 'YES',
-            'GDAL_DISABLE_READDIR_ON_OPEN': 'EMPTY_DIR',
-            'CPL_VSIL_CURL_ALLOWED_EXTENSIONS': '.tif',
-        }
 
         try:
             with rasterio.open(href) as src:
@@ -210,6 +223,10 @@ class DeforestationDetector:
             raise RuntimeError(f"Unable to read raster {href}: {exc}") from exc
         except Exception as exc:
             raise RuntimeError(f"Unexpected error reading {href}: {exc}") from exc
+
+        band = data[0]
+        if isinstance(band, np.ma.MaskedArray):
+            band = band.filled(np.nan)
 
         band = data[0]
         if isinstance(band, np.ma.MaskedArray):

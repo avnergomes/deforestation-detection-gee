@@ -11,7 +11,8 @@
 This project provides a Python-based workflow for detecting land cover changes
 and deforestation using freely available Landsat imagery. The codebase talks
 directly to the public Landsat Collection 2 Level 2 archive published on AWS via
-the Element84 STAC API and computes NDVI locally using `rasterio`.
+the Element84 STAC API, automatically selects the correct bands for each
+Landsat mission (4 through 9), and computes NDVI locally using `rasterio`.
 
 ### Key Features
 
