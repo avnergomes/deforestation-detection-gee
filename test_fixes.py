@@ -39,10 +39,13 @@ def test_detector():
     print("  (This may take a moment...)")
     try:
         scenes = detector._search_landsat_scenes(polygon)
-        print(f"  ✅ Found {len(scenes)} scenes")
-        if scenes:
+        if len(scenes) > 0:
+            print(f"  ✅ Found {len(scenes)} scenes")
             print(f"  - First scene: {scenes[0].id}")
             print(f"  - Date range: {scenes[0].datetime.date()} to {scenes[-1].datetime.date()}")
+        else:
+            print(f"  ⚠️  Found 0 usable scenes")
+            print(f"  - This might mean no Landsat coverage for this area/time")
     except Exception as e:
         print(f"  ❌ Failed to search scenes: {e}")
         sys.exit(1)

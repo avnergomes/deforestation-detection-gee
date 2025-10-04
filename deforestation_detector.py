@@ -32,10 +32,19 @@ else:  # pragma: no cover - import-time branch
 
 STAC_API_URL = "https://earth-search.aws.element84.com/v1"
 LANDSAT_COLLECTION = "landsat-c2-l2"
-NIR_BAND = "SR_B5"
-RED_BAND = "SR_B4"
-GREEN_BAND = "SR_B3"
-BLUE_BAND = "SR_B2"
+
+# Landsat 8/9 OLI band names
+NIR_BAND_L89 = "SR_B5"
+RED_BAND_L89 = "SR_B4"
+GREEN_BAND_L89 = "SR_B3"
+BLUE_BAND_L89 = "SR_B2"
+
+# Landsat 4/5/7 TM/ETM+ band names
+NIR_BAND_L457 = "SR_B4"
+RED_BAND_L457 = "SR_B3"
+GREEN_BAND_L457 = "SR_B2"
+BLUE_BAND_L457 = "SR_B1"
+
 L2_SCALE = 0.0000275
 L2_OFFSET = -0.2
 
@@ -141,17 +150,34 @@ class DeforestationDetector:
         print(f"Found {len(items)} Landsat scenes matching the criteria")
         
         scenes: List[LandsatScene] = []
+        
+        # Track satellite types for diagnostics
+        satellite_counts = {}
 
         for item in items:
             assets = item.assets
-            required_bands = {NIR_BAND, RED_BAND, GREEN_BAND, BLUE_BAND}
-            if not required_bands.issubset(assets):
+            
+            # Determine which Landsat satellite and get appropriate band names
+            # Check for Landsat 8/9 bands first
+            if all(band in assets for band in [NIR_BAND_L89, RED_BAND_L89, GREEN_BAND_L89, BLUE_BAND_L89]):
+                nir_asset = assets[NIR_BAND_L89]
+                red_asset = assets[RED_BAND_L89]
+                green_asset = assets[GREEN_BAND_L89]
+                blue_asset = assets[BLUE_BAND_L89]
+                sat_type = "L8/9"
+            # Check for Landsat 4/5/7 bands
+            elif all(band in assets for band in [NIR_BAND_L457, RED_BAND_L457, GREEN_BAND_L457, BLUE_BAND_L457]):
+                nir_asset = assets[NIR_BAND_L457]
+                red_asset = assets[RED_BAND_L457]
+                green_asset = assets[GREEN_BAND_L457]
+                blue_asset = assets[BLUE_BAND_L457]
+                sat_type = "L4/5/7"
+            else:
+                # Skip scenes without required bands
                 continue
-
-            nir_asset = assets[NIR_BAND]
-            red_asset = assets[RED_BAND]
-            green_asset = assets[GREEN_BAND]
-            blue_asset = assets[BLUE_BAND]
+            
+            # Count satellite types
+            satellite_counts[sat_type] = satellite_counts.get(sat_type, 0) + 1
 
             scenes.append(
                 LandsatScene(
@@ -168,6 +194,8 @@ class DeforestationDetector:
 
         scenes.sort(key=lambda scene: scene.datetime)
         print(f"Prepared {len(scenes)} scenes for NDVI calculation")
+        for sat_type, count in sorted(satellite_counts.items()):
+            print(f"  - {sat_type}: {count} scenes")
         return scenes
 
     def _read_band_array(self, href: str, polygon: Polygon) -> np.ndarray:
